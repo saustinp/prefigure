@@ -24,6 +24,7 @@
 #include <queue>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -98,10 +99,9 @@ PositionMap spring_layout(const std::vector<std::string>& nodes,
         pos[i] = Point2d(dist(rng), dist(rng));
     }
 
-    // Fruchterman-Reingold
-    double area = 1.0;
-    double k = std::sqrt(area / n);
-    double t = 0.1;  // temperature
+    // Fruchterman-Reingold (matching networkx spring_layout defaults)
+    double k = 1.0 / std::sqrt(static_cast<double>(n));
+    double t = 1.0 / std::sqrt(static_cast<double>(n));  // networkx uses W/10, scale-dependent
 
     for (int iter = 0; iter < iterations; ++iter) {
         std::vector<Point2d> disp(n, Point2d(0, 0));
@@ -130,7 +130,7 @@ PositionMap spring_layout(const std::vector<std::string>& nodes,
             disp[v] += f;
         }
 
-        // Apply displacement with temperature limit
+        // Apply displacement capped by temperature (matching networkx)
         for (int i = 0; i < n; ++i) {
             double d = disp[i].norm();
             if (d > 1e-10) {
@@ -138,7 +138,7 @@ PositionMap spring_layout(const std::vector<std::string>& nodes,
             }
         }
 
-        t *= 0.9;  // Cool down
+        t *= 0.95;  // Cool down (networkx uses 0.95)
     }
 
     // Build result
@@ -222,8 +222,9 @@ PositionMap spectral_layout(const std::vector<std::string>& nodes,
     std::map<std::string, int> idx;
     for (int i = 0; i < n; ++i) idx[nodes[i]] = i;
 
-    // Build Laplacian matrix
+    // Build Laplacian matrix (avoid double-counting edges)
     Eigen::MatrixXd L = Eigen::MatrixXd::Zero(n, n);
+    std::set<std::pair<int,int>> seen_edges;
     for (auto& [node, neighbors] : adj) {
         auto it = idx.find(node);
         if (it == idx.end()) continue;
@@ -233,8 +234,11 @@ PositionMap spectral_layout(const std::vector<std::string>& nodes,
             if (jt == idx.end()) continue;
             int v = jt->second;
             if (u != v) {
-                L(u, v) = -1;
-                L(v, u) = -1;
+                auto edge = std::make_pair(std::min(u,v), std::max(u,v));
+                if (seen_edges.count(edge)) continue;
+                seen_edges.insert(edge);
+                L(u, v) -= 1;
+                L(v, u) -= 1;
                 L(u, u) += 1;
                 L(v, v) += 1;
             }
@@ -307,6 +311,91 @@ PositionMap bipartite_layout(const std::vector<std::string>& nodes,
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+// Parse a Python-style dict string like "{'A': ['B','C'], 'D': 'E'}"
+// Returns a map from string keys to vectors of string values.
+static std::map<std::string, std::vector<std::string>> parse_dict_string(const std::string& s) {
+    std::map<std::string, std::vector<std::string>> result;
+
+    // Strip outer whitespace
+    size_t start = s.find_first_not_of(" \t\n\r");
+    size_t end = s.find_last_not_of(" \t\n\r");
+    if (start == std::string::npos) return result;
+    std::string trimmed = s.substr(start, end - start + 1);
+
+    // Strip outer braces
+    if (trimmed.front() == '{') trimmed = trimmed.substr(1);
+    if (trimmed.back() == '}') trimmed = trimmed.substr(0, trimmed.size() - 1);
+
+    // Split by top-level commas (respecting brackets)
+    // First split into key:value pairs
+    std::vector<std::string> pairs;
+    int bracket_depth = 0;
+    std::string current;
+    for (size_t i = 0; i < trimmed.size(); ++i) {
+        char c = trimmed[i];
+        if (c == '[') ++bracket_depth;
+        else if (c == ']') --bracket_depth;
+        else if (c == ',' && bracket_depth == 0) {
+            // Check if this comma separates key:value pairs (not inside a list)
+            // We need to figure out if we've seen a colon since the last split
+            // A simple heuristic: if current contains ':', this is a pair boundary
+            if (current.find(':') != std::string::npos) {
+                pairs.push_back(current);
+                current.clear();
+                continue;
+            }
+            // Otherwise it's a comma inside a value that's not bracketed,
+            // which shouldn't happen for well-formed dicts. But just in case,
+            // keep accumulating.
+        }
+        current += c;
+    }
+    if (!current.empty()) pairs.push_back(current);
+
+    // Helper to strip quotes and whitespace from a string
+    auto strip = [](const std::string& str) -> std::string {
+        size_t s = str.find_first_not_of(" \t\n\r'\"");
+        size_t e = str.find_last_not_of(" \t\n\r'\"");
+        if (s == std::string::npos) return "";
+        return str.substr(s, e - s + 1);
+    };
+
+    for (auto& pair : pairs) {
+        // Find the first colon that separates key from value
+        size_t colon = pair.find(':');
+        if (colon == std::string::npos) continue;
+
+        std::string key = strip(pair.substr(0, colon));
+        std::string value_str = pair.substr(colon + 1);
+
+        // Trim value_str
+        size_t vs = value_str.find_first_not_of(" \t\n\r");
+        size_t ve = value_str.find_last_not_of(" \t\n\r");
+        if (vs == std::string::npos) continue;
+        value_str = value_str.substr(vs, ve - vs + 1);
+
+        std::vector<std::string> values;
+        if (value_str.front() == '[') {
+            // It's a list: strip brackets and split by commas
+            value_str = value_str.substr(1);
+            if (value_str.back() == ']') value_str.pop_back();
+            std::istringstream vss(value_str);
+            std::string item;
+            while (std::getline(vss, item, ',')) {
+                std::string stripped = strip(item);
+                if (!stripped.empty()) values.push_back(stripped);
+            }
+        } else {
+            // Single value
+            values.push_back(strip(value_str));
+        }
+
+        result[key] = values;
+    }
+
+    return result;
+}
+
 // Format a point as "(x,y)" string with high precision
 static std::string fmt_pt(const Point2d& p) {
     return "(" + pt2long_str(p, ",") + ")";
@@ -349,25 +438,20 @@ void network(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus ou
     std::map<std::string, std::string> label_dictionary;
     auto label_dict_attr = element.attribute("label-dictionary");
     if (label_dict_attr) {
-        // Parse as expression that returns key-value pairs
-        // For simplicity, we treat this as a string map
-        // The Python code uses valid_eval which returns a dict
-        try {
-            auto val = diagram.expr_ctx().eval(label_dict_attr.value());
-            // If it evaluates to something, try to use it
-            // For now, label_dictionary stays empty if we can't parse
-        } catch (...) {}
+        auto parsed = parse_dict_string(label_dict_attr.value());
+        for (auto& [k, v] : parsed) {
+            if (!v.empty()) {
+                label_dictionary[k] = v[0];
+            }
+        }
     }
 
     // Parse graph dictionary attribute
     std::map<std::string, std::vector<std::string>> graph_dict;
     auto graph_attr = element.attribute("graph");
     if (graph_attr) {
-        try {
-            auto val = diagram.expr_ctx().eval(graph_attr.value());
-            // The expression evaluator may return this as a structured value
-            // For now we rely on node/edge subelements
-        } catch (...) {
+        graph_dict = parse_dict_string(graph_attr.value());
+        if (graph_dict.empty()) {
             spdlog::error("@graph attribute of a <network> element should be a dictionary");
         }
     }
@@ -781,6 +865,67 @@ void network(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus ou
                 std::string d = get_attr(edge_elem, "dash", edge_dash);
                 if (d != "none")
                     path.append_attribute("dash") = d.c_str();
+
+                // Edge label: if the edge element has text or children
+                bool has_edge_label = false;
+                if (edge_elem.first_child()) {
+                    has_edge_label = true;
+                } else if (edge_elem.text()) {
+                    std::string txt = edge_elem.text().get();
+                    if (txt.find_first_not_of(" \t\n\r") != std::string::npos) {
+                        has_edge_label = true;
+                    }
+                }
+                if (has_edge_label) {
+                    // Determine label anchor position
+                    std::string label_loc_str = get_attr(edge_elem, "label-location", "0.5");
+                    double label_location = 0.5;
+                    try {
+                        label_location = std::stod(label_loc_str);
+                    } catch (...) {}
+
+                    Point2d anchor;
+                    if (std::abs(label_location - 0.5) < 1e-10) {
+                        anchor = center_pt;
+                    } else if (label_location < 0.5) {
+                        std::vector<Eigen::VectorXd> ctrl = {
+                            static_cast<Eigen::VectorXd>(user_p0),
+                            static_cast<Eigen::VectorXd>(c1),
+                            static_cast<Eigen::VectorXd>(center_pt)};
+                        anchor = evaluate_bezier(ctrl, 2.0 * label_location);
+                    } else {
+                        std::vector<Eigen::VectorXd> ctrl = {
+                            static_cast<Eigen::VectorXd>(center_pt),
+                            static_cast<Eigen::VectorXd>(c2),
+                            static_cast<Eigen::VectorXd>(user_p1)};
+                        anchor = evaluate_bezier(ctrl, 2.0 * (label_location - 0.5));
+                    }
+
+                    Point2d direction = user_p1 - user_p0;
+                    Point2d label_direction;
+                    if (y >= 0) {
+                        label_direction = rotate(direction, -M_PI / 2.0);
+                    } else {
+                        label_direction = rotate(direction, M_PI / 2.0);
+                    }
+                    std::string alignment = get_alignment_from_direction(label_direction);
+
+                    // Create the label element as a copy of the edge element
+                    auto label_el = edge_group.append_child("label");
+                    for (auto child = edge_elem.first_child(); child; child = child.next_sibling()) {
+                        label_el.append_copy(child);
+                    }
+                    if (edge_elem.text()) {
+                        std::string txt = edge_elem.text().get();
+                        if (txt.find_first_not_of(" \t\n\r") != std::string::npos) {
+                            label_el.append_child(pugi::node_pcdata).set_value(txt.c_str());
+                        }
+                    }
+                    if (!edge_elem.attribute("alignment")) {
+                        label_el.append_attribute("alignment") = alignment.c_str();
+                    }
+                    label_el.append_attribute("anchor") = fmt_pt(anchor).c_str();
+                }
             }
 
             // Check if this is a straight line (y offset near zero)
@@ -973,6 +1118,63 @@ void network(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus ou
                 std::string d = get_attr(loop_elem, "dash", edge_dash);
                 if (d != "none")
                     path.append_attribute("dash") = d.c_str();
+            }
+
+            // Store loop curves for label positioning
+            std::vector<Eigen::VectorXd> loop_curve0 = {
+                static_cast<Eigen::VectorXd>(node_position),
+                static_cast<Eigen::VectorXd>(P1),
+                static_cast<Eigen::VectorXd>(P2),
+                static_cast<Eigen::VectorXd>(P3)};
+            std::vector<Eigen::VectorXd> loop_curve1 = {
+                static_cast<Eigen::VectorXd>(P3),
+                static_cast<Eigen::VectorXd>(P4),
+                static_cast<Eigen::VectorXd>(P5),
+                static_cast<Eigen::VectorXd>(node_position)};
+
+            // Loop label
+            if (loop_elem) {
+                bool has_loop_label = false;
+                if (loop_elem.first_child()) {
+                    has_loop_label = true;
+                } else if (loop_elem.text()) {
+                    std::string txt = loop_elem.text().get();
+                    if (txt.find_first_not_of(" \t\n\r") != std::string::npos) {
+                        has_loop_label = true;
+                    }
+                }
+                if (has_loop_label) {
+                    double label_location = 0.5;
+                    std::string ll_str = get_attr(loop_elem, "label-location", "0.5");
+                    try { label_location = std::stod(ll_str); } catch (...) {}
+
+                    Point2d anchor, anchor_ep;
+                    if (label_location < 0.5) {
+                        anchor = evaluate_bezier(loop_curve0, 2.0 * label_location);
+                        anchor_ep = evaluate_bezier(loop_curve0, 2.0 * label_location + 0.0001);
+                    } else {
+                        anchor = evaluate_bezier(loop_curve1, 2.0 * (label_location - 0.5));
+                        anchor_ep = evaluate_bezier(loop_curve1, 2.0 * (label_location + 0.0001 - 0.5));
+                    }
+                    Point2d direction = anchor_ep - anchor;
+                    Point2d label_direction = rotate(direction, M_PI / 2.0);
+                    std::string alignment = get_alignment_from_direction(label_direction);
+
+                    auto label_el = edge_group.append_child("label");
+                    for (auto child = loop_elem.first_child(); child; child = child.next_sibling()) {
+                        label_el.append_copy(child);
+                    }
+                    if (loop_elem.text()) {
+                        std::string txt = loop_elem.text().get();
+                        if (txt.find_first_not_of(" \t\n\r") != std::string::npos) {
+                            label_el.append_child(pugi::node_pcdata).set_value(txt.c_str());
+                        }
+                    }
+                    if (!loop_elem.attribute("alignment")) {
+                        label_el.append_attribute("alignment") = alignment.c_str();
+                    }
+                    label_el.append_attribute("anchor") = fmt_pt(anchor).c_str();
+                }
             }
 
             // First cubic Bezier (outgoing arc)

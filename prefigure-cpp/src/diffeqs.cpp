@@ -75,10 +75,14 @@ static void rk45_solve(
     }
 
     // Integrate adaptively, outputting at the t_eval points
+    // Using cubic Hermite interpolation for dense output
     Eigen::VectorXd y = y0_in;
     double t = t0;
     double h = (t_end - t0) / N;  // initial step size
     if (max_step > 0 && h > max_step) h = max_step;
+
+    // Store f(t,y) at the current point for Hermite interpolation
+    Eigen::VectorXd f_curr = f(t, y);
 
     size_t eval_idx = 0;
 
@@ -100,8 +104,8 @@ static void rk45_solve(
         if (max_step > 0 && h > max_step) h = max_step;
         if (h < 1e-15) break;
 
-        // Compute RK45 stages
-        Eigen::VectorXd k1 = f(t, y);
+        // Compute RK45 stages (k1 = f_curr, already computed)
+        Eigen::VectorXd k1 = f_curr;
         Eigen::VectorXd k2 = f(t + dp_a2 * h, y + h * dp_b21 * k1);
         Eigen::VectorXd k3 = f(t + dp_a3 * h, y + h * (dp_b31 * k1 + dp_b32 * k2));
         Eigen::VectorXd k4 = f(t + dp_a4 * h, y + h * (dp_b41 * k1 + dp_b42 * k2 + dp_b43 * k3));
@@ -126,23 +130,29 @@ static void rk45_solve(
 
         if (err_norm <= 1.0) {
             // Step accepted
+            double t_prev = t;
+            Eigen::VectorXd y_prev = y;
+            Eigen::VectorXd f_prev = f_curr;
+
             t += h;
             y = y_new;
+            // f at the new point: use FSAL property (k7 = f(t+h, y_new))
+            f_curr = k7;
 
-            // Output any evaluation points we've passed
+            // Output any evaluation points we've passed using Hermite interpolation
             while (eval_idx < t_eval.size() && t_eval[eval_idx] <= t + 1e-14) {
                 if (std::abs(t - t_eval[eval_idx]) < 1e-14) {
                     out_t.push_back(t);
                     out_y.push_back(y);
                 } else {
-                    // Linear interpolation for points between steps
-                    // (For a production solver you'd use Hermite interpolation
-                    //  with the RK stages, but linear is sufficient here.)
-                    double frac = (t_eval[eval_idx] - (t - h)) / h;
-                    Eigen::VectorXd y_interp = (1.0 - frac) * (y - h * (dp_c1 * k1 + dp_c3 * k3 + dp_c4 * k4 + dp_c5 * k5 + dp_c6 * k6)) + frac * y;
-                    // Simpler: just use the function value at the eval point
-                    // Actually, re-derive: y_prev = y - h*(...), so
-                    // y_interp = y_prev + frac * (y - y_prev) = y_prev * (1-frac) + y * frac
+                    // Cubic Hermite interpolation between (t_prev, y_prev) and (t, y)
+                    // using derivatives f_prev and f_curr
+                    double step_h = t - t_prev;
+                    double s = (t_eval[eval_idx] - t_prev) / step_h;
+                    Eigen::VectorXd dy = y - y_prev;
+                    Eigen::VectorXd y_interp = (1.0 - s) * y_prev + s * y
+                        + s * (s - 1.0) * ((1.0 - 2.0 * s) * dy
+                            + step_h * ((s - 1.0) * f_prev + s * f_curr));
                     out_t.push_back(t_eval[eval_idx]);
                     out_y.push_back(y_interp);
                 }
@@ -258,6 +268,12 @@ void de_solve(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus s
             max_step = diagram.expr_ctx().eval(
                 element.attribute("max-step").value()).to_double();
         } catch (...) {}
+    }
+
+    // Check method attribute
+    std::string method = get_attr(element, "method", "RK45");
+    if (method != "RK45" && method != "DOP853") {
+        spdlog::warn("ODE method '{}' not supported in C++ backend, using RK45", method);
     }
 
     int dim = static_cast<int>(y0.size());

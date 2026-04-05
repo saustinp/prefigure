@@ -18,7 +18,13 @@ void scatter(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus st
     auto data_attr = element.attribute("data");
     if (data_attr) {
         // Data-driven scatter: retrieve data set
-        auto data_val = diagram.expr_ctx().retrieve(data_attr.value());
+        Value data_val;
+        try {
+            data_val = diagram.expr_ctx().retrieve(data_attr.value());
+        } catch (...) {
+            spdlog::error("Could not retrieve data source: {}", data_attr.value());
+            return;
+        }
 
         auto x_attr = element.attribute("x");
         if (!x_attr) {
@@ -31,11 +37,60 @@ void scatter(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus st
             return;
         }
 
-        // For data-driven mode, we expect the data to be accessible via math_utilities
-        // Since the C++ port doesn't have full data frame support yet, we try evaluating
-        // x and y fields as vectors
-        // TODO: full data frame support with filter
-        spdlog::warn("Data-driven scatter not fully supported yet, trying direct evaluation");
+        std::string x_field = x_attr.value();
+        std::string y_field = y_attr.value();
+
+        Eigen::VectorXd x_data, y_data;
+
+        // Handle filter if present
+        auto filter_attr = element.attribute("filter");
+        if (filter_attr) {
+            try {
+                auto filter_val = diagram.expr_ctx().eval(filter_attr.value());
+                if (filter_val.is_vector() && filter_val.as_vector().size() == 2) {
+                    // filter evaluates to (field, value) pair
+                    // For now, log a warning since full data frame filtering requires
+                    // the data to be a dict-like structure
+                    spdlog::warn("Data filter not fully supported in C++ port");
+                }
+            } catch (...) {
+                spdlog::warn("Could not evaluate filter expression");
+            }
+        }
+
+        // Try to get x and y data from the data object
+        // If data is a matrix, treat x_field and y_field as column indices
+        // If x_field/y_field are namespace variables (vectors), use them directly
+        if (data_val.is_matrix()) {
+            auto& mat = data_val.as_matrix();
+            try {
+                int x_col = std::stoi(x_field);
+                int y_col = std::stoi(y_field);
+                x_data = mat.col(x_col);
+                y_data = mat.col(y_col);
+            } catch (...) {
+                spdlog::error("For matrix data, @x and @y should be column indices");
+                return;
+            }
+        } else {
+            // Try retrieving x_field and y_field as namespace variables
+            try {
+                x_data = diagram.expr_ctx().retrieve(x_field).as_vector();
+                y_data = diagram.expr_ctx().retrieve(y_field).as_vector();
+            } catch (...) {
+                spdlog::error("Could not retrieve x={} or y={} from namespace", x_field, y_field);
+                return;
+            }
+        }
+
+        // Zip x and y into points
+        auto zipped = zip_lists(x_data, y_data);
+        Eigen::VectorXd points_flat(static_cast<Eigen::Index>(zipped.size() * 2));
+        for (size_t i = 0; i < zipped.size(); ++i) {
+            points_flat[static_cast<Eigen::Index>(2 * i)] = zipped[i][0];
+            points_flat[static_cast<Eigen::Index>(2 * i + 1)] = zipped[i][1];
+        }
+        diagram.expr_ctx().enter_namespace("__scatter_points", Value(points_flat));
     }
 
     // Try direct points

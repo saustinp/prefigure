@@ -104,14 +104,73 @@ Legend::Legend(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus 
         label_element(label_el, diagram, dummy_group, OutlineStatus::None);
         scratch.remove_child(dummy_group);
 
-        // Determine the key element
+        // Determine the key element by looking up the ref'd element
         std::string ref = label_el.attribute("ref").as_string();
-        XmlNode key_node;
+        XmlNode key_el;
 
-        // For now, create a simple line key as default
-        auto key_el = scratch.append_child("line");
-        key_el.append_attribute("stroke").set_value("black");
-        key_width_ = std::max(key_width_, line_width_);
+        // Look up the referenced element in the diagram source by id or at
+        XmlNode ref_element;
+        if (!ref.empty()) {
+            // Search by id attribute
+            ref_element = diagram.get_diagram_element().find_node(
+                [&ref](pugi::xml_node n) {
+                    return std::string(n.attribute("id").as_string()) == ref;
+                });
+            if (!ref_element) {
+                // Search by at attribute
+                ref_element = diagram.get_diagram_element().find_node(
+                    [&ref](pugi::xml_node n) {
+                        return std::string(n.attribute("at").as_string()) == ref;
+                    });
+            }
+            if (!ref_element) {
+                spdlog::warn("{} should refer to an element", ref);
+            }
+        }
+
+        if (ref_element && std::string(ref_element.name()) == "point") {
+            // Point key: small filled circle
+            key_el = scratch.append_child("point");
+            key_el.append_attribute("p").set_value(anchor_str.c_str());
+            key_el.append_attribute("size").set_value("4");
+            std::string point_id_stub = diagram.prepend_id_prefix("legend-point");
+            key_el.append_attribute("id").set_value(
+                (point_id_stub + "-" + std::to_string(num)).c_str());
+            // Copy visual attributes from referenced point
+            for (auto attr : {"fill", "stroke", "style"}) {
+                auto a = ref_element.attribute(attr);
+                if (a) key_el.append_attribute(attr).set_value(a.value());
+            }
+            key_width_ = std::max(key_width_, point_width);
+        } else if (ref_element) {
+            std::string ref_fill = get_attr(ref_element, "fill", "none");
+            if (ref_fill != "none") {
+                // Filled shape key: filled box
+                key_el = scratch.append_child("point");
+                key_el.append_attribute("stroke").set_value(
+                    get_attr(ref_element, "stroke", "none").c_str());
+                key_el.append_attribute("fill").set_value(ref_fill.c_str());
+                key_el.append_attribute("style").set_value(
+                    get_attr(ref_element, "style", "box").c_str());
+                key_el.append_attribute("size").set_value("5");
+                key_width_ = std::max(key_width_, point_width);
+            } else {
+                // Line key
+                key_el = scratch.append_child("line");
+                key_el.append_attribute("stroke").set_value(
+                    get_attr(ref_element, "stroke", "none").c_str());
+                std::string dash = get_attr(ref_element, "dash", "");
+                if (!dash.empty()) {
+                    key_el.append_attribute("stroke-dasharray").set_value(dash.c_str());
+                }
+                key_width_ = std::max(key_width_, line_width_);
+            }
+        } else {
+            // Fallback: simple line key
+            key_el = scratch.append_child("line");
+            key_el.append_attribute("stroke").set_value("black");
+            key_width_ = std::max(key_width_, line_width_);
+        }
 
         ItemEntry entry;
         entry.key = key_el;
@@ -198,16 +257,57 @@ void Legend::place_legend(Diagram& diagram) {
         auto dims = diagram.get_label_dims(entry.label);
         if (dims.first == 0 && dims.second == 0) continue;
 
-        // Position label
-        std::string label_tform = translatestr(label_x, y);
-        auto label_g = group_.append_child("g");
-        label_g.append_attribute("transform").set_value(label_tform.c_str());
+        // Retrieve the actual label group from diagram's label_group_dict
+        auto [label_group, label_el_node, label_ctm] = diagram.get_label_group(entry.label);
+        if (label_group) {
+            std::string label_tform = translatestr(label_x, y);
+            label_group.append_attribute("transform").set_value(label_tform.c_str());
+            group_.append_copy(label_group);
+        } else {
+            // Fallback: create empty placeholder
+            auto label_g = group_.append_child("g");
+            std::string label_tform = translatestr(label_x, y);
+            label_g.append_attribute("transform").set_value(label_tform.c_str());
+        }
 
         // Position key
         double key_y = y + dims.second / 2.0;
         std::string key_tag = entry.key.name();
 
-        if (key_tag == "line") {
+        if (key_tag == "point") {
+            double key_x = outer_padding + key_width_ / 2.0;
+            Point2d user_point = diagram.inverse_transform(Point2d(key_x, key_y));
+            entry.key.attribute("p") ?
+                entry.key.attribute("p").set_value(pt2str(user_point, ",").c_str()) :
+                entry.key.append_attribute("p").set_value(pt2str(user_point, ",").c_str());
+            // Process the point element into the legend group
+            // For now, append a circle representation
+            auto key_copy = group_.append_child("circle");
+            key_copy.append_attribute("cx").set_value(std::to_string(key_x).c_str());
+            key_copy.append_attribute("cy").set_value(std::to_string(key_y).c_str());
+            std::string size = entry.key.attribute("size").as_string("4");
+            key_copy.append_attribute("r").set_value(size.c_str());
+            auto fill_a = entry.key.attribute("fill");
+            if (fill_a) key_copy.append_attribute("fill").set_value(fill_a.value());
+            else key_copy.append_attribute("fill").set_value("black");
+            auto stroke_a = entry.key.attribute("stroke");
+            if (stroke_a) key_copy.append_attribute("stroke").set_value(stroke_a.value());
+
+            std::string style = entry.key.attribute("style").as_string("");
+            if (style == "box") {
+                // Replace circle with rect for box style
+                group_.remove_child(key_copy);
+                auto rect = group_.append_child("rect");
+                double sz = std::stod(size);
+                rect.append_attribute("x").set_value(std::to_string(key_x - sz).c_str());
+                rect.append_attribute("y").set_value(std::to_string(key_y - sz).c_str());
+                rect.append_attribute("width").set_value(std::to_string(2 * sz).c_str());
+                rect.append_attribute("height").set_value(std::to_string(2 * sz).c_str());
+                if (fill_a) rect.append_attribute("fill").set_value(fill_a.value());
+                else rect.append_attribute("fill").set_value("black");
+                if (stroke_a) rect.append_attribute("stroke").set_value(stroke_a.value());
+            }
+        } else if (key_tag == "line") {
             double key_x0 = outer_padding;
             double key_x1 = outer_padding + line_width_;
             auto key_copy = group_.append_copy(entry.key);
@@ -290,9 +390,18 @@ void Legend::place_tactile_legend(Diagram& diagram) {
 
         double lx = gap * std::round(label_x / gap);
         double ly = gap * std::round(y / gap);
-        std::string label_tform = translatestr(lx, ly);
-        auto label_g = group_.append_child("g");
-        label_g.append_attribute("transform").set_value(label_tform.c_str());
+
+        // Retrieve the actual label group from diagram's label_group_dict
+        auto [label_group, label_el_node, label_ctm] = diagram.get_label_group(entry.label);
+        if (label_group) {
+            std::string label_tform = translatestr(lx, ly);
+            label_group.append_attribute("transform").set_value(label_tform.c_str());
+            group_.append_copy(label_group);
+        } else {
+            std::string label_tform = translatestr(lx, ly);
+            auto label_g = group_.append_child("g");
+            label_g.append_attribute("transform").set_value(label_tform.c_str());
+        }
 
         double key_y = y + dims.second / 2.0;
         std::string key_tag = entry.key.name();

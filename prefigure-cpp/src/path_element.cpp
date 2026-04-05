@@ -315,22 +315,85 @@ static std::pair<std::vector<std::string>, Point2d> process_tag(
         return {cmds, current_point};
     }
 
+    // Helper: parse Bezier control points from a controls attribute.
+    // Handles both flat format [x1,y1,x2,y2,...] and nested tuple format
+    // ((x1,y1),(x2,y2),(x3,y3)) which is the Python convention.
+    auto parse_bezier_controls = [&diagram](const std::string& controls_str)
+        -> std::vector<Point2d> {
+        std::vector<Point2d> pts;
+
+        // Try evaluating the whole expression
+        try {
+            auto val = diagram.expr_ctx().eval(controls_str);
+            if (val.is_vector()) {
+                auto& v = val.as_vector();
+                if (v.size() >= 4 && v.size() % 2 == 0) {
+                    // Flat format: [x1,y1,x2,y2,...]
+                    for (Eigen::Index i = 0; i + 1 < v.size(); i += 2) {
+                        pts.emplace_back(v[i], v[i + 1]);
+                    }
+                    return pts;
+                } else if (v.size() == 2) {
+                    pts.emplace_back(v[0], v[1]);
+                    return pts;
+                }
+            }
+        } catch (...) {}
+
+        // Try parsing as nested tuple: ((x1,y1),(x2,y2),(x3,y3))
+        std::string s = controls_str;
+        // Strip outer parens/brackets
+        while (!s.empty() && (s.front() == '(' || s.front() == '[')) s = s.substr(1);
+        while (!s.empty() && (s.back() == ')' || s.back() == ']')) s.pop_back();
+
+        // Split on "),(" or "),[" boundaries
+        std::vector<std::string> parts;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            auto next = s.find("),(", pos);
+            if (next == std::string::npos) next = s.find("),[", pos);
+            if (next == std::string::npos) {
+                // Last part — add remaining and break
+                std::string part = s.substr(pos);
+                // Ensure wrapped in parens for eval
+                if (!part.empty() && part.front() != '(') part = "(" + part;
+                if (!part.empty() && part.back() != ')') part += ")";
+                parts.push_back(part);
+                break;
+            }
+            std::string part = s.substr(pos, next - pos);
+            if (!part.empty() && part.front() != '(') part = "(" + part;
+            part += ")";
+            parts.push_back(part);
+            pos = next + 2;  // skip past "),"
+        }
+
+        for (auto& part : parts) {
+            try {
+                auto pv = diagram.expr_ctx().eval(part);
+                if (pv.is_vector() && pv.as_vector().size() >= 2) {
+                    pts.push_back(pv.as_point());
+                }
+            } catch (...) {}
+        }
+        return pts;
+    };
+
     if (tag == "cubic-bezier") {
         cmds.push_back("C");
         try {
-            auto val = diagram.expr_ctx().eval(child.attribute("controls").value());
-            auto& v = val.as_vector();
-            // v should contain pairs of coords: [x1,y1,x2,y2,x3,y3]
-            int num_points = static_cast<int>(v.size()) / 2;
+            auto control_pts = parse_bezier_controls(
+                child.attribute("controls").value());
             std::string pts_str;
-            for (int i = 0; i < num_points; ++i) {
-                Point2d cp(v[i * 2], v[i * 2 + 1]);
+            for (auto& cp : control_pts) {
                 Point2d tcp = diagram.transform(cp);
                 if (!pts_str.empty()) pts_str += " ";
                 pts_str += pt2str(tcp);
             }
             cmds.push_back(pts_str);
-            current_point = Point2d(v[v.size() - 2], v[v.size() - 1]);
+            if (!control_pts.empty()) {
+                current_point = control_pts.back();
+            }
         } catch (...) {
             spdlog::error("Error in <cubic-bezier> defining controls={}",
                           get_attr(child, "controls", ""));
@@ -341,18 +404,18 @@ static std::pair<std::vector<std::string>, Point2d> process_tag(
     if (tag == "quadratic-bezier") {
         cmds.push_back("Q");
         try {
-            auto val = diagram.expr_ctx().eval(child.attribute("controls").value());
-            auto& v = val.as_vector();
-            int num_points = static_cast<int>(v.size()) / 2;
+            auto control_pts = parse_bezier_controls(
+                child.attribute("controls").value());
             std::string pts_str;
-            for (int i = 0; i < num_points; ++i) {
-                Point2d cp(v[i * 2], v[i * 2 + 1]);
+            for (auto& cp : control_pts) {
                 Point2d tcp = diagram.transform(cp);
                 if (!pts_str.empty()) pts_str += " ";
                 pts_str += pt2str(tcp);
             }
             cmds.push_back(pts_str);
-            current_point = Point2d(v[v.size() - 2], v[v.size() - 1]);
+            if (!control_pts.empty()) {
+                current_point = control_pts.back();
+            }
         } catch (...) {
             spdlog::error("Error in <quadratic-bezier> defining controls={}",
                           get_attr(child, "controls", ""));

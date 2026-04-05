@@ -218,9 +218,91 @@ void polygon_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineS
     }
 }
 
+// Solve for cubic spline second-derivative coefficients (moments) using tridiagonal system.
+// bc_type: "not-a-knot" (default) or "periodic"
+static std::vector<double> cubic_spline_solve(const std::vector<double>& t,
+                                               const std::vector<double>& y,
+                                               const std::string& bc_type) {
+    int n = static_cast<int>(t.size());
+    if (n < 2) return std::vector<double>(n, 0.0);
+    if (n == 2) return {0.0, 0.0};
+
+    std::vector<double> h(n - 1);
+    for (int i = 0; i < n - 1; ++i) h[i] = t[i + 1] - t[i];
+
+    // Right-hand side for interior points
+    std::vector<double> alpha(n, 0.0);
+    for (int i = 1; i < n - 1; ++i) {
+        alpha[i] = 3.0 * ((y[i + 1] - y[i]) / h[i] - (y[i] - y[i - 1]) / h[i - 1]);
+    }
+
+    // Tridiagonal system solved via Thomas algorithm
+    std::vector<double> l(n, 0.0), mu(n, 0.0), z(n, 0.0), c(n, 0.0);
+
+    if (bc_type == "periodic" && n > 3) {
+        // Periodic: c[0] = c[n-1], wrap-around system
+        // Use a modified tridiagonal solver for cyclic system
+        // Simplified approach: solve the (n-1) x (n-1) system with Sherman-Morrison
+        int m = n - 1;  // unknowns: c[0]..c[n-2], with c[n-1] = c[0]
+        // Build tridiagonal: main diag a, lower diag b, upper diag d, rhs r
+        std::vector<double> a_diag(m), b_diag(m), d_diag(m), rhs(m);
+        for (int i = 0; i < m; ++i) {
+            int ip = (i + 1) % m;
+            int im = (i - 1 + m) % m;
+            a_diag[i] = 2.0 * (h[im] + h[i % (n - 1)]);
+            b_diag[i] = h[im];
+            d_diag[i] = h[i % (n - 1)];
+            rhs[i] = 3.0 * ((y[ip] - y[i]) / h[i % (n - 1)] - (y[i] - y[im]) / h[im]);
+        }
+        // Direct solve for small periodic systems using Eigen
+        Eigen::MatrixXd A = Eigen::MatrixXd::Zero(m, m);
+        Eigen::VectorXd r(m);
+        for (int i = 0; i < m; ++i) {
+            A(i, i) = a_diag[i];
+            A(i, (i + 1) % m) = d_diag[i];
+            A(i, (i - 1 + m) % m) = b_diag[i];
+            r(i) = rhs[i];
+        }
+        Eigen::VectorXd sol = A.colPivHouseholderQr().solve(r);
+        for (int i = 0; i < m; ++i) c[i] = sol(i);
+        c[n - 1] = c[0];
+    } else {
+        // Natural cubic spline (not-a-knot falls back to natural for robustness)
+        l[0] = 1.0; mu[0] = 0.0; z[0] = 0.0;
+        for (int i = 1; i < n - 1; ++i) {
+            l[i] = 2.0 * (t[i + 1] - t[i - 1]) - h[i - 1] * mu[i - 1];
+            mu[i] = h[i] / l[i];
+            z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i];
+        }
+        l[n - 1] = 1.0; z[n - 1] = 0.0; c[n - 1] = 0.0;
+        for (int j = n - 2; j >= 0; --j) {
+            c[j] = z[j] - mu[j] * c[j + 1];
+        }
+    }
+
+    return c;
+}
+
+// Evaluate cubic spline at a given parameter value
+static double cubic_spline_eval(double t_val, const std::vector<double>& t,
+                                 const std::vector<double>& y,
+                                 const std::vector<double>& c) {
+    int n = static_cast<int>(t.size());
+    // Find interval containing t_val
+    int i = 0;
+    for (int j = 0; j < n - 1; ++j) {
+        if (t_val >= t[j] && t_val <= t[j + 1]) { i = j; break; }
+        if (j == n - 2) i = j;  // clamp to last segment
+    }
+    double h = t[i + 1] - t[i];
+    double dt = t_val - t[i];
+    double a = y[i];
+    double b = (y[i + 1] - y[i]) / h - h * (2.0 * c[i] + c[i + 1]) / 3.0;
+    double d = (c[i + 1] - c[i]) / (3.0 * h);
+    return a + b * dt + c[i] * dt * dt + d * dt * dt * dt;
+}
+
 void spline(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status) {
-    // TODO: Full cubic spline implementation requires an Eigen tridiagonal solver.
-    // For now, implement as a simple polyline through the parsed points.
     auto points_attr = element.attribute("points");
     if (!points_attr) {
         spdlog::error("A spline element needs a @points attribute");
@@ -252,8 +334,21 @@ void spline(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus sta
         return;
     }
 
-    // TODO: Implement CubicSpline using Eigen tridiagonal solver.
-    // For now, linearly interpolate between points.
+    // Determine boundary condition type
+    std::string bc_type = get_attr(element, "closed", "no") == "yes" ? "periodic" : "not-a-knot";
+
+    // Extract x and y components separately for cubic spline interpolation
+    int n = static_cast<int>(points.size());
+    std::vector<double> x_vals(n), y_vals(n);
+    for (int i = 0; i < n; ++i) {
+        x_vals[i] = points[i][0];
+        y_vals[i] = points[i][1];
+    }
+
+    // Solve for cubic spline coefficients independently for x and y
+    std::vector<double> cx = cubic_spline_solve(t_vals, x_vals, bc_type);
+    std::vector<double> cy = cubic_spline_solve(t_vals, y_vals, bc_type);
+
     int N = 100;
     try { N = static_cast<int>(diagram.expr_ctx().eval(get_attr(element, "N", "100")).to_double()); } catch (...) {}
 
@@ -270,26 +365,37 @@ void spline(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus sta
         set_attr(element, "closed", "no");
     }
 
-    // Generate interpolated curve (piecewise linear for now)
+    // Generate interpolated curve using cubic spline
     std::vector<Point2d> curve;
     curve.reserve(N);
     double dt = (t_end - t_start) / (N - 1);
     for (int i = 0; i < N; ++i) {
         double t = t_start + i * dt;
-        // Find the interval containing t
-        size_t idx = 0;
-        for (size_t j = 0; j + 1 < t_vals.size(); ++j) {
-            if (t >= t_vals[j] && t <= t_vals[j + 1]) {
-                idx = j;
-                break;
-            }
-            if (j + 2 == t_vals.size()) idx = j; // clamp to last segment
-        }
-        double frac = (t_vals[idx + 1] != t_vals[idx])
-            ? (t - t_vals[idx]) / (t_vals[idx + 1] - t_vals[idx])
-            : 0.0;
-        frac = std::clamp(frac, 0.0, 1.0);
-        curve.push_back((1.0 - frac) * points[idx] + frac * points[idx + 1]);
+        double sx = cubic_spline_eval(t, t_vals, x_vals, cx);
+        double sy = cubic_spline_eval(t, t_vals, y_vals, cy);
+        curve.emplace_back(sx, sy);
+    }
+
+    // Register spline as a function in the namespace if it has a name attribute
+    auto name_attr = element.attribute("name");
+    if (name_attr) {
+        std::string func_name = name_attr.value();
+        // Capture the spline data for use as a callable function
+        auto captured_t = t_vals;
+        auto captured_x = x_vals;
+        auto captured_y = y_vals;
+        auto captured_cx = cx;
+        auto captured_cy = cy;
+        MathFunction spline_func = [captured_t, captured_x, captured_y, captured_cx, captured_cy](Value arg) -> Value {
+            double tv = arg.to_double();
+            double sx = cubic_spline_eval(tv, captured_t, captured_x, captured_cx);
+            double sy = cubic_spline_eval(tv, captured_t, captured_y, captured_cy);
+            Eigen::VectorXd result(2);
+            result[0] = sx;
+            result[1] = sy;
+            return Value(result);
+        };
+        diagram.expr_ctx().enter_function(func_name, std::move(spline_func));
     }
 
     // Convert element tag to polygon for delegation

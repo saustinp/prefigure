@@ -13,6 +13,22 @@ option(PREFIGURE_WITH_DIFFEQS "ODE solver support (Boost.Odeint)" ON)
 option(PREFIGURE_WITH_NETWORK "Network graph support (Boost.Graph)" ON)
 option(PREFIGURE_WITH_SHAPES "Boolean geometry support (GEOS)" ON)
 option(PREFIGURE_WITH_CAIRO "Cairo text measurement" ON)
+
+# Debug/sanitizer/coverage options
+option(PREFIGURE_SANITIZE "Enable AddressSanitizer + UBSan" OFF)
+option(PREFIGURE_COVERAGE "Enable code coverage (gcov)" OFF)
+
+if(PREFIGURE_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+    message(STATUS "Sanitizers enabled: AddressSanitizer + UndefinedBehaviorSanitizer")
+endif()
+
+if(PREFIGURE_COVERAGE)
+    add_compile_options(--coverage -fprofile-arcs -ftest-coverage)
+    add_link_options(--coverage)
+    message(STATUS "Code coverage enabled (gcov)")
+endif()
 option(PREFIGURE_WITH_LIBLOUIS "Braille translation via liblouis" ON)
 
 include(FetchContent)
@@ -255,14 +271,14 @@ if(PREFIGURE_BUILD_PYTHON)
         FetchContent_MakeAvailable(pybind11)
     endif()
 
-    pybind11_add_module(_prefigure_cpp
+    pybind11_add_module(_prefigure
         bindings/module.cpp
         bindings/py_parse.cpp
         bindings/py_diagram.cpp
         bindings/py_types.cpp
     )
-    target_link_libraries(_prefigure_cpp PRIVATE prefigure)
-    install(TARGETS _prefigure_cpp DESTINATION prefig)
+    target_link_libraries(_prefigure PRIVATE prefigure)
+    install(TARGETS _prefigure DESTINATION prefig)
 endif()
 
 # ---- Tests ----

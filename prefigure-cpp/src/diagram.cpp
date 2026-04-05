@@ -1061,6 +1061,10 @@ ExpressionContext& Diagram::expr_ctx() {
     return expr_ctx_;
 }
 
+XmlNode Diagram::get_diagram_element() const {
+    return diagram_element_;
+}
+
 void Diagram::set_caption(const std::string& text) {
     caption_ = text;
 }

@@ -1,4 +1,5 @@
 #include "prefigure/riemann_sum.hpp"
+#include "prefigure/annotations.hpp"
 #include "prefigure/diagram.hpp"
 #include "prefigure/group.hpp"
 #include "prefigure/label.hpp"
@@ -104,8 +105,49 @@ void riemann_sum(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatu
         return;
     }
 
-    // Handle annotations (stub - just set up structure)
-    // Note: annotation support is limited in C++ port for now
+    // Handle annotations
+    XmlNode annotation;
+    std::string interval_text;
+    bool has_annotation = false;
+
+    if (get_attr(element, "annotate", "no") == "yes" &&
+        status != OutlineStatus::AddOutline) {
+        auto scratch = diagram.get_scratch();
+        annotation = scratch.append_child("annotation");
+        has_annotation = true;
+
+        // Copy relevant attributes
+        for (const char* attr_name : {"id", "text", "circular", "sonify", "speech"}) {
+            auto a = element.attribute(attr_name);
+            if (a) {
+                annotation.append_attribute(attr_name).set_value(a.value());
+            }
+        }
+
+        // Set ref from id
+        auto ann_id = annotation.attribute("id");
+        if (ann_id) {
+            annotation.append_attribute("ref").set_value(ann_id.value());
+        }
+
+        // Evaluate text and speech via evaluate_text
+        auto text_a = annotation.attribute("text");
+        if (text_a) {
+            text_a.set_value(evaluate_text(text_a.value(), diagram.expr_ctx()).c_str());
+        }
+        auto speech_a = annotation.attribute("speech");
+        if (speech_a) {
+            speech_a.set_value(evaluate_text(speech_a.value(), diagram.expr_ctx()).c_str());
+        }
+
+        diagram.push_to_annotation_branch(annotation);
+
+        // Check for subinterval text
+        auto sub_text_attr = element.attribute("subinterval-text");
+        if (sub_text_attr) {
+            interval_text = sub_text_attr.value();
+        }
+    }
 
     // Transform element into a group with area-under-curve sub-elements
     element.set_name("group");
@@ -214,9 +256,22 @@ void riemann_sum(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatu
                 area.append_attribute("N").set_value("100");
             }
         }
+
+        // Add interval annotation if subinterval-text was specified
+        if (has_annotation && !interval_text.empty()) {
+            auto interval_annotation = annotation.append_child("annotation");
+            interval_annotation.append_attribute("ref").set_value(area.attribute("id").value());
+            interval_annotation.append_attribute("text").set_value(
+                evaluate_text(interval_text, diagram.expr_ctx()).c_str());
+        }
     }
 
     group(element, diagram, parent, status);
+
+    // Pop from annotation branch after processing all intervals
+    if (has_annotation) {
+        diagram.pop_from_annotation_branch();
+    }
 }
 
 }  // namespace prefigure

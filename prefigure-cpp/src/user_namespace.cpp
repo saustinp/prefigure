@@ -112,11 +112,13 @@ std::string ExpressionContext::preprocess(const std::string& expr, bool substitu
     auto rtrim = result.find_last_not_of(" \t\n\r");
     if (rtrim != std::string::npos) result = result.substr(0, rtrim + 1);
 
-    if (substitution) {
-        // Replace ^ with ** (exprtk uses ^ for power natively, so we keep it)
-        // Actually, exprtk already supports ^ as power, so just keep it.
-        // But Python code replaces ^ with **, and exprtk treats ^ as power.
-        // No transformation needed for exprtk.
+    // Replace ** with ^ for exprtk (Python uses **, exprtk uses ^)
+    {
+        size_t pos = 0;
+        while ((pos = result.find("**", pos)) != std::string::npos) {
+            result.replace(pos, 2, "^");
+            pos += 1;  // advance past the ^
+        }
     }
 
     return result;
@@ -293,11 +295,14 @@ Value ExpressionContext::eval(const std::string& raw_expr,
         return result;
     }
 
+    // Replace array subscript patterns like name[index] with scalar values
+    std::string subscript_replaced = replace_array_subscripts(expr);
+
     // Try to evaluate user-defined function calls within the expression.
     // This pre-processes the expression string, replacing any calls to
     // known user-defined functions with their evaluated numeric results,
     // so that exprtk can handle the rest.
-    std::string processed_expr = replace_function_calls(expr);
+    std::string processed_expr = replace_function_calls(subscript_replaced);
 
     // Try scalar evaluation with exprtk
     // First, we need to set up exprtk with current namespace scalars
@@ -431,6 +436,44 @@ static std::string trim(const std::string& s) {
 // Check if a character is valid in an identifier
 static bool is_ident_char(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+std::string ExpressionContext::replace_array_subscripts(const std::string& expr) {
+    std::string result = expr;
+    std::regex sub_re(R"(([a-zA-Z_]\w*)\[([^\]]+)\])");
+    std::smatch match;
+    std::string working = result;
+
+    // Iteratively replace subscript patterns from left to right
+    while (std::regex_search(working, match, sub_re)) {
+        std::string id_name = match[1].str();
+        std::string index_expr = match[2].str();
+
+        // Check if the identifier is a known vector in the namespace
+        auto ns_it = namespace_.find(id_name);
+        if (ns_it != namespace_.end() && ns_it->second.is_vector()) {
+            try {
+                // Evaluate the index expression
+                int idx = static_cast<int>(const_cast<ExpressionContext*>(this)->eval(index_expr, std::nullopt, false).to_double());
+                auto& vec = ns_it->second.as_vector();
+                if (idx >= 0 && idx < static_cast<int>(vec.size())) {
+                    double val = vec[idx];
+                    std::string val_str = std::to_string(val);
+                    // Replace the match in working
+                    std::string prefix = match.prefix().str();
+                    std::string suffix = match.suffix().str();
+                    working = prefix + val_str + suffix;
+                    continue;  // re-scan from beginning
+                }
+            } catch (...) {
+                // If index evaluation fails, leave as-is
+            }
+        }
+        // Not a vector subscript or failed; skip past this match
+        // To avoid infinite loop, break out of matching
+        break;
+    }
+    return working;
 }
 
 std::string ExpressionContext::replace_function_calls(const std::string& expr) {

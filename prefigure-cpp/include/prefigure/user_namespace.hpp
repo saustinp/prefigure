@@ -202,6 +202,9 @@ private:
     // Pre-process expression: handle ^ substitution, detect tuples
     std::string preprocess(const std::string& expr, bool substitution) const;
 
+    // Replace array subscript patterns like name[index] with their scalar values
+    std::string replace_array_subscripts(const std::string& expr);
+
     // Replace user-defined function calls in an expression with their
     // evaluated numeric results so that exprtk can handle the rest.
     std::string replace_function_calls(const std::string& expr);

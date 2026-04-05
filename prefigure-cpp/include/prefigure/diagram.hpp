@@ -583,6 +583,12 @@ public:
      */
     ExpressionContext& expr_ctx();
 
+    /**
+     * @brief Get the source diagram XML element.
+     * @return The diagram XML node.
+     */
+    XmlNode get_diagram_element() const;
+
     // -- Caption ------------------------------------------------------------
 
     /**
