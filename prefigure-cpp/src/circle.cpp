@@ -84,7 +84,7 @@ void circle_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
         return;
     }
 
-    XmlNode circle = parent.append_child("path");
+    XmlNode circle = diagram.get_scratch().append_child("path");
     auto id_attr = element.attribute("id");
     if (id_attr) diagram.add_id(circle, id_attr.value());
     diagram.register_svg_element(element, circle);
@@ -131,8 +131,9 @@ void circle_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
         diagram.output_format() == OutputFormat::Tactile) {
         diagram.add_outline(element, circle, parent);
         finish_outline_circle(element, diagram, parent);
+    } else {
+        parent.append_copy(circle);
     }
-    // else: circle is already appended to parent
 }
 
 static void finish_outline_circle(XmlNode element, Diagram& diagram, XmlNode parent) {
@@ -185,7 +186,7 @@ void ellipse(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus st
     int N = 100;
     try { N = static_cast<int>(diagram.expr_ctx().eval(get_attr(element, "N", "100")).to_double()); } catch (...) {}
 
-    XmlNode ell = parent.append_child("path");
+    XmlNode ell = diagram.get_scratch().append_child("path");
     auto id_attr = element.attribute("id");
     if (id_attr) diagram.add_id(ell, id_attr.value());
     diagram.register_svg_element(element, ell);
@@ -229,6 +230,8 @@ void ellipse(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus st
         diagram.output_format() == OutputFormat::Tactile) {
         diagram.add_outline(element, ell, parent);
         finish_outline_circle(element, diagram, parent);
+    } else {
+        parent.append_copy(ell);
     }
 }
 
@@ -312,7 +315,7 @@ void arc(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status
     int N = 100;
     try { N = static_cast<int>(diagram.expr_ctx().eval(get_attr(element, "N", "100")).to_double()); } catch (...) {}
 
-    XmlNode arc_el = parent.append_child("path");
+    XmlNode arc_el = diagram.get_scratch().append_child("path");
     auto id_attr = element.attribute("id");
     if (id_attr) diagram.add_id(arc_el, id_attr.value());
     diagram.register_svg_element(element, arc_el);
@@ -482,7 +485,7 @@ void angle_marker(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStat
         }
     }
 
-    XmlNode arc_el = parent.append_child("path");
+    XmlNode arc_el = diagram.get_scratch().append_child("path");
     auto id_attr = element.attribute("id");
     if (id_attr) diagram.add_id(arc_el, id_attr.value());
     diagram.register_svg_element(element, arc_el);
@@ -555,7 +558,8 @@ void angle_marker(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStat
     } else {
         XmlNode original_parent = parent;
         parent = add_label_circle(element, diagram, parent);
-        // arc_el is already appended to parent
+        // Copy arc_el from scratch space into the SVG tree
+        parent.append_copy(arc_el);
 
         if (original_parent == parent) return;
 

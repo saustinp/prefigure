@@ -54,12 +54,12 @@ std::string add_tactile_arrowhead_marker(Diagram& diagram, XmlNode path, bool mi
 
     std::string d = "M " + pt2str(p1) + " L " + pt2str(p2) + " L " + pt2str(p3) + " Z";
 
-    // Create marker element
+    // Create marker element in scratch space; add_reusable will copy to defs
     double x2 = l - s;
     double dims_h = 2.0 * y;
 
-    XmlNode defs = diagram.get_defs();
-    XmlNode marker = defs.append_child("marker");
+    XmlNode scratch = diagram.get_scratch();
+    XmlNode marker = scratch.append_child("marker");
     marker.append_attribute("id").set_value(id.c_str());
     marker.append_attribute("markerWidth").set_value(float2str(stroke_width * (l - x2)).c_str());
     marker.append_attribute("markerHeight").set_value(float2str(stroke_width * dims_h).c_str());
@@ -113,7 +113,7 @@ std::string add_tactile_arrowhead_marker(Diagram& diagram, XmlNode path, bool mi
         + " Z";
 
     std::string outline_id = id + "-outline";
-    XmlNode outline_marker = defs.append_child("marker");
+    XmlNode outline_marker = scratch.append_child("marker");
     outline_marker.append_attribute("id").set_value(outline_id.c_str());
     outline_marker.append_attribute("markerWidth").set_value(
         float2str(stroke_width * (l - x2) + 2.0 * outline_width).c_str());
@@ -217,9 +217,9 @@ std::string add_arrowhead_marker(Diagram& diagram, XmlNode path, bool mid,
         + "L " + pt2str(p5)
         + "Z";
 
-    // Create marker
-    XmlNode defs = diagram.get_defs();
-    XmlNode marker = defs.append_child("marker");
+    // Create marker in scratch space; add_reusable will copy to defs
+    XmlNode scratch = diagram.get_scratch();
+    XmlNode marker = scratch.append_child("marker");
     marker.append_attribute("id").set_value(id.c_str());
     marker.append_attribute("markerWidth").set_value(float2str(stroke_width * (l - x2)).c_str());
     marker.append_attribute("markerHeight").set_value(float2str(stroke_width * 2.0 * s).c_str());
@@ -271,7 +271,7 @@ std::string add_arrowhead_marker(Diagram& diagram, XmlNode path, bool mid,
         + " Z";
 
     std::string outline_id = id + "-outline";
-    XmlNode outline_marker = defs.append_child("marker");
+    XmlNode outline_marker = scratch.append_child("marker");
     outline_marker.append_attribute("id").set_value(outline_id.c_str());
     outline_marker.append_attribute("markerWidth").set_value(
         float2str(stroke_width * (l - x2) + 2.0 * outline_width).c_str());

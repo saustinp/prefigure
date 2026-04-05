@@ -113,7 +113,7 @@ void graph(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
         attribs["fill"] = element.attribute("fill").value();
     }
 
-    XmlNode path = parent.append_child("path");
+    XmlNode path = diagram.get_scratch().append_child("path");
     add_attr(path, attribs);
     diagram.register_svg_element(element, path);
 
@@ -142,8 +142,9 @@ void graph(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
         diagram.output_format() == OutputFormat::Tactile) {
         diagram.add_outline(element, path, parent);
         finish_outline_graph(element, diagram, parent);
+    } else {
+        parent.append_copy(path);
     }
-    // else: path already appended to parent
 }
 
 static void finish_outline_graph(XmlNode element, Diagram& diagram, XmlNode parent) {

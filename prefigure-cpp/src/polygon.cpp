@@ -193,7 +193,7 @@ void polygon_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineS
         }
     }
 
-    XmlNode path = parent.append_child("path");
+    XmlNode path = diagram.get_scratch().append_child("path");
     auto id_attr = element.attribute("id");
     if (id_attr) diagram.add_id(path, id_attr.value());
     diagram.register_svg_element(element, path);
@@ -225,8 +225,9 @@ void polygon_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineS
         diagram.output_format() == OutputFormat::Tactile) {
         diagram.add_outline(element, path, parent);
         finish_outline_polygon(element, diagram, parent);
+    } else {
+        parent.append_copy(path);
     }
-    // else: path already appended to parent
 }
 
 void spline(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status) {

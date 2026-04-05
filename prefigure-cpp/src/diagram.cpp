@@ -686,6 +686,15 @@ XmlNode Diagram::get_defs() {
     return defs_;
 }
 
+XmlNode Diagram::get_scratch() {
+    // Lazily create a persistent root node in the scratch document
+    XmlNode root = scratch_doc_.first_child();
+    if (!root) {
+        root = scratch_doc_.append_child("scratch");
+    }
+    return root;
+}
+
 void Diagram::add_reusable(XmlNode element) {
     auto id_attr = element.attribute("id");
     std::string id = id_attr ? id_attr.value() : "none";

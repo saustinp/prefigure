@@ -96,27 +96,29 @@ void point(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
     // Determine style
     std::string style = get_attr(element, "style", "circle");
 
-    // Create the shape element
+    // Create the shape element in scratch space; it will be copied into
+    // the parent tree (or into defs for outline mode) at the end.
+    XmlNode scratch = diagram.get_scratch();
     XmlNode shape;
     std::string id_str;
     auto id_attr = element.attribute("id");
     if (id_attr) id_str = id_attr.value();
 
     if (style == "circle") {
-        shape = parent.append_child("circle");
+        shape = scratch.append_child("circle");
         diagram.add_id(shape, id_str);
         shape.append_attribute("cx").set_value(float2str(p[0]).c_str());
         shape.append_attribute("cy").set_value(float2str(p[1]).c_str());
         shape.append_attribute("r").set_value(size_str.c_str());
     } else if (style == "box") {
-        shape = parent.append_child("rect");
+        shape = scratch.append_child("rect");
         diagram.add_id(shape, id_str);
         shape.append_attribute("x").set_value(float2str(p[0] - size).c_str());
         shape.append_attribute("y").set_value(float2str(p[1] - size).c_str());
         shape.append_attribute("width").set_value(float2str(2.0 * size).c_str());
         shape.append_attribute("height").set_value(float2str(2.0 * size).c_str());
     } else if (style == "diamond") {
-        shape = parent.append_child("polygon");
+        shape = scratch.append_child("polygon");
         diagram.add_id(shape, id_str);
         double ds = size * 1.4;
         std::string points;
@@ -126,7 +128,7 @@ void point(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
         points += " " + pt2str(Point2d(p[0] - ds, p[1]), ",");
         shape.append_attribute("points").set_value(points.c_str());
     } else if (style == "cross") {
-        shape = parent.append_child("path");
+        shape = scratch.append_child("path");
         diagram.add_id(shape, id_str);
         double ds = size * 1.4;
         std::string d = "M " + pt2str(Point2d(p[0] - ds, p[1] + ds));
@@ -135,7 +137,7 @@ void point(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
         d += "L " + pt2str(Point2d(p[0] - ds, p[1] - ds));
         shape.append_attribute("d").set_value(d.c_str());
     } else if (style == "plus") {
-        shape = parent.append_child("path");
+        shape = scratch.append_child("path");
         diagram.add_id(shape, id_str);
         double ds = size * 1.4;
         std::string d = "M " + pt2str(Point2d(p[0] - ds, p[1]));
@@ -144,7 +146,7 @@ void point(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
         d += "L " + pt2str(Point2d(p[0], p[1] - ds));
         shape.append_attribute("d").set_value(d.c_str());
     } else if (style == "double-circle") {
-        shape = parent.append_child("path");
+        shape = scratch.append_child("path");
         diagram.add_id(shape, id_str);
         double r1 = size;
         double indent = std::min(size / 4.0, 9.0);
@@ -164,7 +166,7 @@ void point(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
         shape.append_attribute("d").set_value(d.c_str());
     } else {
         // Default to circle
-        shape = parent.append_child("circle");
+        shape = scratch.append_child("circle");
         diagram.add_id(shape, id_str);
         shape.append_attribute("cx").set_value(float2str(p[0]).c_str());
         shape.append_attribute("cy").set_value(float2str(p[1]).c_str());
@@ -209,10 +211,11 @@ void point(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
         XmlNode original_parent = parent;
         parent = add_label_to_point(element, diagram, parent);
 
-        // Shape is already appended to parent (or original_parent)
+        // Copy shape from scratch space into the SVG tree
+        XmlNode placed = parent.append_copy(shape);
 
         if (original_parent == parent) {
-            diagram.register_svg_element(element, shape);
+            diagram.register_svg_element(element, placed);
             return;
         }
 

@@ -1,0 +1,56 @@
+# Doxygen configuration for PreFigure C++
+# This generates XML output consumed by Sphinx/Breathe (not standalone HTML)
+
+PROJECT_NAME           = "PreFigure C++"
+PROJECT_NUMBER         = 0.6.0
+PROJECT_BRIEF          = "High-performance C++ backend for accessible mathematical diagram generation"
+
+# Input
+INPUT                  = ../include/prefigure
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp
+EXCLUDE_PATTERNS       = */third_party/*
+
+# Output — XML only (Breathe consumes this; Sphinx renders HTML)
+OUTPUT_DIRECTORY       = _build/doxygen
+GENERATE_XML           = YES
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+XML_PROGRAMLISTING     = YES
+
+# Extraction settings
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+EXTRACT_ANON_NSPACES   = NO
+
+# Comment style
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MULTILINE_CPP_IS_BRIEF = NO
+
+# Preprocessing — define all feature flags so conditional code is documented
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+PREDEFINED             = PREFIGURE_HAS_DIFFEQS \
+                         PREFIGURE_HAS_NETWORK \
+                         PREFIGURE_HAS_SHAPES \
+                         PREFIGURE_HAS_CAIRO \
+                         PREFIGURE_HAS_LIBLOUIS
+
+# Source browsing
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+# Warnings
+WARN_IF_UNDOCUMENTED   = YES
+WARN_NO_PARAMDOC       = YES
+WARN_FORMAT            = "$file:$line: $text"
+
+# Other
+SORT_MEMBER_DOCS       = NO
+SORT_BRIEF_DOCS        = NO
+ALPHABETICAL_INDEX     = YES
+SHOW_NAMESPACES        = YES

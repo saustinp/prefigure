@@ -281,12 +281,9 @@ XmlNode mk_line(const Point2d& p0_in, const Point2d& p1_in, Diagram& diagram,
         }
     }
 
-    // Create the line element in the diagram's SVG doc
-    XmlNode defs = diagram.get_defs();
-    XmlNode root = diagram.get_root();
-    // We create a temporary element; the caller will append_copy it
-    pugi::xml_document tmp;
-    XmlNode line_node = tmp.append_child("line");
+    // Create the line element in the diagram's scratch document so it
+    // outlives this function.  Callers will append_copy it into the SVG tree.
+    XmlNode line_node = diagram.get_scratch().append_child("line");
     diagram.add_id(line_node, id);
     line_node.append_attribute("x1").set_value(float2str(p0[0]).c_str());
     line_node.append_attribute("y1").set_value(float2str(p0[1]).c_str());

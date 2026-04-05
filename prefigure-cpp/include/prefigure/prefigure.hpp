@@ -1,6 +1,13 @@
 #pragma once
 
-// Master include for the PreFigure C++ library
+/**
+ * @file prefigure.hpp
+ * @brief Master include header for the PreFigure C++ library.
+ *
+ * Including this single header provides access to all public API types,
+ * the Diagram class, the expression evaluator, coordinate transforms,
+ * math utilities, and the XML parse/render pipeline.
+ */
 
 #include "types.hpp"
 #include "calculus.hpp"

@@ -23,7 +23,12 @@ std::string get_color(const std::string& color) {
 
 void add_attr(XmlNode element, const std::unordered_map<std::string, std::string>& attrs) {
     for (const auto& [k, v] : attrs) {
-        element.append_attribute(k.c_str()).set_value(v.c_str());
+        auto existing = element.attribute(k.c_str());
+        if (existing) {
+            existing.set_value(v.c_str());
+        } else {
+            element.append_attribute(k.c_str()).set_value(v.c_str());
+        }
     }
 }
 

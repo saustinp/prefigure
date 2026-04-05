@@ -50,8 +50,8 @@ void rectangle(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus 
         return;
     }
 
-    // Create a <path> (not <rect>) for shape operations
-    XmlNode path = parent.append_child("path");
+    // Create a <path> in scratch space; it will be copied into parent or defs later
+    XmlNode path = diagram.get_scratch().append_child("path");
     auto id_attr = element.attribute("id");
     if (id_attr) diagram.add_id(path, id_attr.value());
     diagram.register_svg_element(element, path);
@@ -161,7 +161,7 @@ void rectangle(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus 
         diagram.add_outline(element, path, parent);
         finish_outline(element, diagram, parent);
     } else {
-        // path is already appended to parent via append_child above
+        parent.append_copy(path);
     }
 }
 

@@ -434,9 +434,8 @@ std::optional<Eigen::VectorXd> ExpressionContext::try_eval_vector(const std::str
 // --- ODE break/delta detection ---
 
 void ExpressionContext::initialize_breaks() {
-    static std::vector<double> breaks_storage;
-    breaks_storage.clear();
-    breaks_ = &breaks_storage;
+    breaks_storage_.clear();
+    breaks_ = &breaks_storage_;
 }
 
 std::vector<double> ExpressionContext::find_breaks(const MathFunction2& f, double t, const Value& y) {

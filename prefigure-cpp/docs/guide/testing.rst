@@ -1,0 +1,140 @@
+Testing
+=======
+
+The project uses three levels of testing: C++ unit tests, C++ integration
+tests, and Python correctness comparison against the reference Python
+implementation.
+
+C++ Unit Tests (Catch2)
+-----------------------
+
+Unit tests live in ``tests/`` and are built with `Catch2 v3 <https://github.com/catchorg/Catch2>`_.
+
+**Running all tests**::
+
+    ./build/tests/prefigure_tests
+
+**Running specific test tags**::
+
+    ./build/tests/prefigure_tests "[calculus]"
+    ./build/tests/prefigure_tests "[ctm]"
+    ./build/tests/prefigure_tests "[math_utilities]"
+    ./build/tests/prefigure_tests "[user_namespace]"
+    ./build/tests/prefigure_tests "[integration]"
+    ./build/tests/prefigure_tests "[pipeline]"
+
+**Current test files:**
+
+.. list-table::
+   :header-rows: 1
+
+   * - File
+     - Tag
+     - What it tests
+   * - ``test_calculus.cpp``
+     - ``[calculus]``
+     - Richardson extrapolation derivatives vs analytical
+   * - ``test_math_utilities.cpp``
+     - ``[math_utilities]``
+     - Vector ops, Bezier, line intersection, indicators
+   * - ``test_ctm.cpp``
+     - ``[ctm]``
+     - Identity, translate, rotate, scale, compose, inverse
+   * - ``test_user_namespace.cpp``
+     - ``[user_namespace]``
+     - Constants, arithmetic, functions, vectors, colors
+   * - ``test_diagram_integration.cpp``
+     - ``[integration]``
+     - XML parsing, full pipeline for example diagrams
+
+C++ Integration Tests
+---------------------
+
+Pipeline tests load real XML example files, run them through the full
+``parse()`` pipeline, and verify the output SVG:
+
+- Is well-formed XML (parseable by pugixml)
+- Has an ``<svg>`` root with ``width``, ``height``, ``viewBox``
+- Contains ``<defs>`` with at least one clippath
+- Has a non-trivial number of graphical elements
+
+Example test (from ``test_diagram_integration.cpp``)::
+
+    TEST_CASE("Full pipeline: tangent.xml produces SVG output", "[pipeline]") {
+        prefigure::parse(xml_path, prefigure::OutputFormat::SVG,
+                         "", false, prefigure::Environment::PfCli);
+        REQUIRE(std::filesystem::exists(output_path));
+        // ... verify SVG structure ...
+    }
+
+Python Correctness Comparison
+-----------------------------
+
+The ``correctness_comparison.py`` script (in the project root) runs all 8
+example XML files through both the Python and C++ backends and compares the
+SVG output for structural equivalence.
+
+**Running it**::
+
+    source .venv/bin/activate
+    python3 correctness_comparison.py
+
+**What it compares:**
+
+- Element tags (must match exactly)
+- Attribute values (numeric attributes compared with tolerance)
+- Path ``d`` data (tokenized, commands exact, numbers with tolerance)
+- Transform attributes (numeric values with tolerance)
+- Style properties (split and compared individually)
+- Skips volatile attributes: ``id``, ``clip-path``, ``href`` (generated IDs differ)
+
+**Options**::
+
+    python3 correctness_comparison.py --tolerance 1e-2   # looser tolerance
+    python3 correctness_comparison.py -v                 # verbose diffs
+    python3 correctness_comparison.py --python-only      # just validate Python
+    python3 correctness_comparison.py --examples tangent.xml  # specific files
+
+Performance Benchmarking
+------------------------
+
+The ``profiling_comparison.py`` script benchmarks Python vs C++ across
+micro-benchmarks and full diagram builds::
+
+    source .venv/bin/activate
+    python3 profiling_comparison.py --runs 5 --output results.png
+
+This produces a matplotlib plot with side-by-side bar charts for each benchmark,
+including speedup ratios.
+
+Adding a New Test
+-----------------
+
+**Unit test**: Add a ``TEST_CASE`` to an existing test file or create a new
+``.cpp`` file and add it to ``tests/CMakeLists.txt``::
+
+    add_executable(prefigure_tests
+        ...
+        test_my_new_module.cpp
+    )
+
+**Pipeline test**: Add a new ``TEST_CASE`` to ``test_diagram_integration.cpp``
+that loads an XML file, runs ``prefigure::parse()``, and checks the output.
+
+**Golden file test** (future): Generate reference SVGs from Python, store in
+``tests/golden/``, and compare C++ output numerically.
+
+Test Resources
+--------------
+
+Example XML files are copied to ``tests/resources/`` at build time. They
+come from ``prefig/resources/examples/`` in the Python project:
+
+- ``tangent.xml`` — graph + tangent line + point
+- ``derivatives.xml`` — function + first/second derivatives
+- ``de-system.xml`` — system of ODEs
+- ``diffeqs.xml`` — slope field + solution curves
+- ``implicit.xml`` — implicit curves (level sets)
+- ``projection.xml`` — vector projection
+- ``riemann.xml`` — Riemann sum approximation
+- ``roots_of_unity.xml`` — complex roots of unity on unit circle

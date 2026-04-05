@@ -7,15 +7,11 @@
 
 #include <spdlog/spdlog.h>
 
-#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
 
 namespace prefigure {
-
-// EPUB character check regex
-static const std::regex epub_char_check("[A-Za-z0-9_-]");
 
 // Substitution map for common disallowed characters
 static const std::unordered_map<char, char> epub_dict = {
@@ -24,12 +20,15 @@ static const std::unordered_map<char, char> epub_dict = {
     {'=', '_'}, {'#', 'h'}
 };
 
+static bool is_epub_safe(char ch) {
+    return std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' || ch == '-';
+}
+
 std::string epub_clean(const std::string& s) {
     std::string result;
     result.reserve(s.size());
     for (char ch : s) {
-        std::string ch_str(1, ch);
-        if (std::regex_match(ch_str, epub_char_check)) {
+        if (is_epub_safe(ch)) {
             result += ch;
         } else {
             auto it = epub_dict.find(ch);

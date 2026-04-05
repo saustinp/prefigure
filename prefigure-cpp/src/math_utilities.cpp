@@ -1,5 +1,6 @@
 #include "prefigure/math_utilities.hpp"
 #include "prefigure/calculus.hpp"
+#include "prefigure/diagram.hpp"
 
 #include <cmath>
 #include <limits>
@@ -195,7 +196,15 @@ Eigen::VectorXd line_intersection(
     double denom = normal.dot(v);
 
     if (std::abs(denom) < 1e-10) {
-        // Lines are parallel; return midpoint of bounding box as fallback
+        // Lines are parallel; return center of bbox as fallback
+        Diagram* diag = math_get_diagram();
+        if (diag) {
+            BBox bbox = diag->bbox();
+            Eigen::VectorXd center(2);
+            center[0] = (bbox[0] + bbox[2]) / 2.0;
+            center[1] = (bbox[1] + bbox[3]) / 2.0;
+            return center;
+        }
         return 0.5 * (p1 + q1);
     }
 
@@ -212,9 +221,21 @@ double intersect(
     double interval_max) {
 
     double width = interval_max - interval_min;
-    double tolerance = 1e-6 * width;
-    double upper = 10.0 * width;
-    double lower = -10.0 * width;
+
+    // Compute vertical bounds from the diagram's bbox when available
+    double height = width;  // fallback
+    double upper, lower;
+    Diagram* diag = math_get_diagram();
+    if (diag) {
+        BBox bbox = diag->bbox();
+        height = bbox[3] - bbox[1];
+        upper = bbox[3] + height;
+        lower = bbox[1] - height;
+    } else {
+        upper = 10.0 * width;
+        lower = -10.0 * width;
+    }
+    double tolerance = 1e-6 * height;
 
     double x0 = seed;
     double y0 = f(x0);
