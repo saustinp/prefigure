@@ -17,18 +17,6 @@
 namespace prefigure {
 
 // Alignment helpers (duplicated from point.cpp -- ideally shared)
-static const std::vector<std::string> alignment_circle_arr = {
-    "east", "northeast", "north", "northwest",
-    "west", "southwest", "south", "southeast"
-};
-
-static std::string get_alignment_from_direction(const Point2d& direction) {
-    double angle = std::atan2(direction[1], direction[0]) * 180.0 / M_PI;
-    int align = static_cast<int>(std::round(angle / 45.0)) % 8;
-    if (align < 0) align += 8;
-    return alignment_circle_arr[align];
-}
-
 // Forward declarations
 static void finish_outline_circle(XmlNode element, Diagram& diagram, XmlNode parent);
 static XmlNode add_label_circle(XmlNode element, Diagram& diagram, XmlNode parent);
@@ -363,8 +351,9 @@ void arc(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status
         diagram.output_format() == OutputFormat::Tactile) {
         diagram.add_outline(element, arc_el, parent, 4);
         finish_outline_circle(element, diagram, parent);
+    } else {
+        parent.append_copy(arc_el);
     }
-    // else: arc_el already appended to parent
 }
 
 void angle_marker(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status) {

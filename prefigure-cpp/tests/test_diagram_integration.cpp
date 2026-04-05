@@ -6,36 +6,30 @@
 
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 
-TEST_CASE("Test resources exist", "[integration]") {
-    std::string resources_dir = TEST_RESOURCES_DIR;
+static const std::string RES = TEST_RESOURCES_DIR;
 
-    REQUIRE(std::filesystem::exists(resources_dir + "/tangent.xml"));
-    REQUIRE(std::filesystem::exists(resources_dir + "/derivatives.xml"));
-    REQUIRE(std::filesystem::exists(resources_dir + "/de-system.xml"));
-    REQUIRE(std::filesystem::exists(resources_dir + "/diffeqs.xml"));
-    REQUIRE(std::filesystem::exists(resources_dir + "/implicit.xml"));
-    REQUIRE(std::filesystem::exists(resources_dir + "/projection.xml"));
-    REQUIRE(std::filesystem::exists(resources_dir + "/riemann.xml"));
-    REQUIRE(std::filesystem::exists(resources_dir + "/roots_of_unity.xml"));
+// Helper: count all elements recursively in an XML tree
+static int count_elements(pugi::xml_node root) {
+    int total = 0;
+    std::function<void(pugi::xml_node)> walk = [&](pugi::xml_node n) {
+        for (auto child : n.children()) {
+            if (child.type() == pugi::node_element) {
+                total++;
+                walk(child);
+            }
+        }
+    };
+    walk(root);
+    return total;
 }
 
-TEST_CASE("Test XML files are parseable", "[integration]") {
-    std::string resources_dir = TEST_RESOURCES_DIR;
-
-    pugi::xml_document doc;
-    auto result = doc.load_file((resources_dir + "/tangent.xml").c_str());
-    REQUIRE(result);
-
-    auto diagram = doc.child("diagram");
-    REQUIRE(diagram);
-    REQUIRE(diagram.attribute("dimensions"));
-}
-
-TEST_CASE("Full pipeline: tangent.xml produces SVG output", "[integration][pipeline]") {
-    std::string resources_dir = TEST_RESOURCES_DIR;
-    std::string xml_path = resources_dir + "/tangent.xml";
+// Helper: run full pipeline on an XML file and verify SVG output
+static void verify_pipeline(const std::string& name, int min_elements = 5) {
+    std::string xml_path = RES + "/" + name + ".xml";
+    std::string output_path = RES + "/output/" + name + ".svg";
 
     // Run the full parse pipeline
     REQUIRE_NOTHROW(
@@ -44,7 +38,6 @@ TEST_CASE("Full pipeline: tangent.xml produces SVG output", "[integration][pipel
     );
 
     // Check that SVG output was created
-    std::string output_path = resources_dir + "/output/tangent.svg";
     REQUIRE(std::filesystem::exists(output_path));
 
     // Verify the SVG is well-formed XML
@@ -52,44 +45,79 @@ TEST_CASE("Full pipeline: tangent.xml produces SVG output", "[integration][pipel
     auto load_result = svg_doc.load_file(output_path.c_str());
     REQUIRE(load_result);
 
-    // Verify it's an SVG root
+    // Verify it's an SVG root with dimensions
     auto svg_root = svg_doc.child("svg");
     REQUIRE(svg_root);
-
-    // Should have width/height/viewBox
     REQUIRE(svg_root.attribute("width"));
     REQUIRE(svg_root.attribute("height"));
 
-    // Should have <defs> with at least a clippath
-    auto defs = svg_root.child("defs");
-    REQUIRE(defs);
+    // Should have <defs>
+    REQUIRE(svg_root.child("defs"));
 
-    // Should have some path elements (the graph and tangent line)
-    int path_count = 0;
-    for (auto node : svg_root.children()) {
-        if (std::string(node.name()) == "path") path_count++;
-    }
-    // At minimum we expect some graphical elements were created
-    INFO("SVG has " << path_count << " top-level path elements");
-
-    // Count all elements recursively
-    int total_elements = 0;
-    std::function<void(pugi::xml_node)> count_elements = [&](pugi::xml_node n) {
-        for (auto child : n.children()) {
-            if (child.type() == pugi::node_element) {
-                total_elements++;
-                count_elements(child);
-            }
-        }
-    };
-    count_elements(svg_root);
-    INFO("SVG has " << total_elements << " total elements");
-    REQUIRE(total_elements > 5);
+    // Count elements
+    int total = count_elements(svg_root);
+    INFO(name << ".xml produced SVG with " << total << " elements");
+    REQUIRE(total >= min_elements);
 
     // Clean up
     std::filesystem::remove(output_path);
-    std::filesystem::remove_all(resources_dir + "/output");
+    std::filesystem::remove_all(RES + "/output");
 }
 
-// projection.xml requires vector/label modules (Phase 4+) — skip for now
-// TEST_CASE("Full pipeline: projection.xml produces SVG output", "[integration][pipeline]") { ... }
+// --- Resource existence tests ---
+
+TEST_CASE("Test resources exist", "[integration]") {
+    REQUIRE(std::filesystem::exists(RES + "/tangent.xml"));
+    REQUIRE(std::filesystem::exists(RES + "/derivatives.xml"));
+    REQUIRE(std::filesystem::exists(RES + "/de-system.xml"));
+    REQUIRE(std::filesystem::exists(RES + "/diffeqs.xml"));
+    REQUIRE(std::filesystem::exists(RES + "/implicit.xml"));
+    REQUIRE(std::filesystem::exists(RES + "/projection.xml"));
+    REQUIRE(std::filesystem::exists(RES + "/riemann.xml"));
+    REQUIRE(std::filesystem::exists(RES + "/roots_of_unity.xml"));
+}
+
+TEST_CASE("Test XML files are parseable", "[integration]") {
+    pugi::xml_document doc;
+    REQUIRE(doc.load_file((RES + "/tangent.xml").c_str()));
+    auto diagram = doc.child("diagram");
+    REQUIRE(diagram);
+    REQUIRE(diagram.attribute("dimensions"));
+}
+
+// --- Full pipeline tests ---
+
+TEST_CASE("Pipeline: tangent.xml", "[pipeline]") {
+    verify_pipeline("tangent", 10);
+}
+
+TEST_CASE("Pipeline: derivatives.xml", "[pipeline]") {
+    verify_pipeline("derivatives", 10);
+}
+
+TEST_CASE("Pipeline: implicit.xml", "[pipeline]") {
+    verify_pipeline("implicit", 5);
+}
+
+TEST_CASE("Pipeline: projection.xml", "[pipeline]") {
+    verify_pipeline("projection", 5);
+}
+
+TEST_CASE("Pipeline: riemann.xml", "[pipeline]") {
+    verify_pipeline("riemann", 5);
+}
+
+TEST_CASE("Pipeline: roots_of_unity.xml", "[pipeline]") {
+    verify_pipeline("roots_of_unity", 5);
+}
+
+// de-system.xml and diffeqs.xml require ODE solving (Phase 6) — test if available
+#ifdef PREFIGURE_HAS_DIFFEQS
+TEST_CASE("Pipeline: de-system.xml", "[pipeline][diffeqs]") {
+    verify_pipeline("de-system", 5);
+}
+
+TEST_CASE("Pipeline: diffeqs.xml", "[pipeline][diffeqs]") {
+    verify_pipeline("diffeqs", 5);
+}
+#endif

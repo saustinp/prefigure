@@ -148,14 +148,27 @@ Value ExpressionContext::eval(const std::string& raw_expr,
         return result;
     }
 
-    // Check for assignment/function definition: contains '='
-    auto eq_pos = expr.find('=');
-    if (eq_pos != std::string::npos && eq_pos > 0 && expr[eq_pos - 1] != '!'
-        && expr[eq_pos - 1] != '<' && expr[eq_pos - 1] != '>') {
-        // Check it's not ==
-        if (eq_pos + 1 < expr.size() && expr[eq_pos + 1] == '=') {
-            // It's a comparison, not assignment — fall through
-        } else {
+    // Check for assignment/function definition: find first non-comparison '='
+    // Skip '==', '!=', '<=', '>=' by searching for '=' that isn't part of these
+    size_t eq_pos = std::string::npos;
+    for (size_t i = 0; i < expr.size(); ++i) {
+        if (expr[i] == '=') {
+            // Check it's not ==, !=, <=, >=
+            bool is_comparison = false;
+            if (i > 0 && (expr[i-1] == '!' || expr[i-1] == '<' || expr[i-1] == '>'))
+                is_comparison = true;
+            if (i + 1 < expr.size() && expr[i+1] == '=')
+                is_comparison = true;
+            if (!is_comparison) {
+                eq_pos = i;
+                break;
+            }
+            // Skip the second '=' of '=='
+            if (i + 1 < expr.size() && expr[i+1] == '=') ++i;
+        }
+    }
+    if (eq_pos != std::string::npos && eq_pos > 0) {
+        {
             std::string lhs = expr.substr(0, eq_pos);
             std::string rhs = expr.substr(eq_pos + 1);
 
@@ -280,6 +293,12 @@ Value ExpressionContext::eval(const std::string& raw_expr,
         return result;
     }
 
+    // Try to evaluate user-defined function calls within the expression.
+    // This pre-processes the expression string, replacing any calls to
+    // known user-defined functions with their evaluated numeric results,
+    // so that exprtk can handle the rest.
+    std::string processed_expr = replace_function_calls(expr);
+
     // Try scalar evaluation with exprtk
     // First, we need to set up exprtk with current namespace scalars
     try {
@@ -301,7 +320,7 @@ Value ExpressionContext::eval(const std::string& raw_expr,
         expression.register_symbol_table(sym);
 
         exprtk::parser<double> parser;
-        if (parser.compile(expr, expression)) {
+        if (parser.compile(processed_expr, expression)) {
             double result_val = expression.value();
             Value result(result_val);
             if (name) {
@@ -378,6 +397,137 @@ void ExpressionContext::register_derivative(const std::string& f_name, const std
         return Value(derivative(f_scalar, xd));
     };
     enter_function(df_name, std::move(df));
+}
+
+// --- User-defined function call evaluation ---
+
+// Split a string by commas at parenthesis depth 0
+static std::vector<std::string> split_args(const std::string& s) {
+    std::vector<std::string> args;
+    int depth = 0;
+    std::string current;
+    for (char c : s) {
+        if (c == '(' || c == '[') ++depth;
+        if (c == ')' || c == ']') --depth;
+        if (c == ',' && depth == 0) {
+            args.push_back(current);
+            current.clear();
+        } else {
+            current += c;
+        }
+    }
+    if (!current.empty()) args.push_back(current);
+    return args;
+}
+
+// Trim whitespace from both ends
+static std::string trim(const std::string& s) {
+    auto start = s.find_first_not_of(" \t\n\r");
+    if (start == std::string::npos) return "";
+    auto end = s.find_last_not_of(" \t\n\r");
+    return s.substr(start, end - start + 1);
+}
+
+// Check if a character is valid in an identifier
+static bool is_ident_char(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+std::string ExpressionContext::replace_function_calls(const std::string& expr) {
+    // Scan the expression for patterns like identifier(...) where identifier
+    // is a user-defined function in namespace_. Replace each such call with
+    // its evaluated numeric result so exprtk can handle the surrounding math.
+
+    std::string result;
+    size_t i = 0;
+    while (i < expr.size()) {
+        // Try to match an identifier starting at position i
+        if (std::isalpha(static_cast<unsigned char>(expr[i])) || expr[i] == '_') {
+            size_t id_start = i;
+            while (i < expr.size() && is_ident_char(expr[i])) ++i;
+            std::string id_name = expr.substr(id_start, i - id_start);
+
+            // Check if followed by '(' and if id_name is a user-defined function
+            if (i < expr.size() && expr[i] == '(') {
+                auto ns_it = namespace_.find(id_name);
+                if (ns_it != namespace_.end() && (ns_it->second.is_function() || ns_it->second.is_function2())) {
+                    // Find the matching closing parenthesis
+                    size_t paren_start = i;
+                    int depth = 1;
+                    size_t j = i + 1;
+                    while (j < expr.size() && depth > 0) {
+                        if (expr[j] == '(') ++depth;
+                        if (expr[j] == ')') --depth;
+                        ++j;
+                    }
+                    if (depth != 0) {
+                        // Unmatched parenthesis; just pass through
+                        result += id_name;
+                        continue;
+                    }
+                    // Extract the arguments string (between the parens)
+                    std::string args_str = expr.substr(paren_start + 1, j - paren_start - 2);
+
+                    auto* self = this;
+
+                    try {
+                        auto format_value = [&](const Value& call_result, size_t pos, size_t end_pos) {
+                            if (call_result.is_double()) {
+                                result += std::to_string(call_result.as_double());
+                            } else if (call_result.is_vector()) {
+                                result += "(";
+                                for (Eigen::Index vi = 0; vi < call_result.as_vector().size(); ++vi) {
+                                    if (vi > 0) result += ",";
+                                    result += std::to_string(call_result.as_vector()[vi]);
+                                }
+                                result += ")";
+                            } else if (call_result.is_string()) {
+                                result += call_result.as_string();
+                            } else {
+                                result += expr.substr(pos, end_pos - pos + 1);
+                            }
+                        };
+
+                        if (ns_it->second.is_function()) {
+                            auto func_args = split_args(args_str);
+                            if (func_args.size() == 1) {
+                                Value arg_val = self->eval(trim(func_args[0]), std::nullopt, false);
+                                Value call_result = ns_it->second.as_function()(arg_val);
+                                format_value(call_result, id_start, j - 1);
+                            } else {
+                                // Single-arg function called with wrong arg count; pass through
+                                result += id_name;
+                                continue;
+                            }
+                        } else if (ns_it->second.is_function2()) {
+                            auto func_args = split_args(args_str);
+                            if (func_args.size() == 2) {
+                                Value arg1 = self->eval(trim(func_args[0]), std::nullopt, false);
+                                Value arg2 = self->eval(trim(func_args[1]), std::nullopt, false);
+                                Value call_result = ns_it->second.as_function2()(arg1, arg2);
+                                format_value(call_result, id_start, j - 1);
+                            } else {
+                                result += id_name;
+                                continue;
+                            }
+                        }
+                        i = j;  // Advance past the closing paren
+                        continue;
+                    } catch (...) {
+                        // If evaluation fails, pass through the original text
+                        result += id_name;
+                        continue;
+                    }
+                }
+            }
+            // Not a user-defined function call; just append the identifier
+            result += id_name;
+        } else {
+            result += expr[i];
+            ++i;
+        }
+    }
+    return result;
 }
 
 // --- Vector literal parsing ---

@@ -1,111 +1,70 @@
 #pragma once
 
 #include "types.hpp"
+#include "label_tools.hpp"
+#include "ctm.hpp"
 
+#include <memory>
 #include <string>
+#include <tuple>
+#include <unordered_map>
+#include <vector>
 
 namespace prefigure {
 
-/**
- * @brief Render a `<label>` XML element as SVG.
- *
- * Adds a text label (typically rendered via MathJax or a tactile renderer)
- * at a specified position, with configurable alignment, offset, and rotation.
- *
- * @par XML Attributes
- * - `p` or `at` (required): Position expression for the label anchor.
- * - `alignment` (optional, default: "southeast"): Label placement relative to anchor.
- * - `offset` (optional): Pixel offset from the anchor point.
- * - `rotate` (optional): Rotation angle for the label text.
- * - Text content: The label text (may include LaTeX math).
- *
- * @par SVG Output
- * Creates a `<g>` element containing the rendered label content.
- *
- * @param element Source XML element.
- * @param diagram Parent diagram context.
- * @param parent  SVG parent node for appending output.
- * @param status  Outline rendering pass.
- *
- * @note Currently a stub implementation.
- */
-void label_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status);
+// Forward declarations
+class Legend;
+class ExpressionContext;
 
-/**
- * @brief Render a `<caption>` XML element by setting the diagram's caption text.
- *
- * @par XML Attributes
- * - Text content: The caption string.
- *
- * @par SVG Output
- * None directly -- sets caption metadata on the Diagram.
- *
- * @param element Source XML element.
- * @param diagram Parent diagram context.
- * @param parent  SVG parent node (unused).
- * @param status  Outline rendering pass (unused).
- *
- * @note Currently a stub implementation.
- */
-void caption(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status);
+// ---------------------------------------------------------------------------
+// Module-level state (singletons for the label subsystem)
+// ---------------------------------------------------------------------------
 
-/**
- * @brief Check whether an XML tag name corresponds to a label-related element.
- *
- * @param tag The tag name to test.
- * @return True if the tag is a label element tag.
- *
- * @note Currently a stub that always returns false.
- */
-bool is_label_tag(const std::string& tag);
-
-/**
- * @brief Evaluate ${...} expression substitutions in a text string.
- *
- * Scans the input for `${expr}` patterns and replaces each with the
- * evaluated result from the expression context.
- *
- * @param text The input text, possibly containing `${...}` expressions.
- * @return The text with all expressions evaluated and substituted.
- *
- * @note Currently a stub that returns an empty string.
- */
-std::string evaluate_text(const std::string& text);
-
-/**
- * @brief Position all deferred labels within a diagram.
- *
- * Called during the finalization phase to compute final positions for
- * labels that were registered during the parse phase.
- *
- * @param diagram  The diagram context.
- * @param group_id The SVG group ID containing the labels.
- * @param element  The root element for label placement.
- *
- * @note Currently a stub implementation.
- */
-void place_labels(Diagram& diagram, const std::string& group_id, XmlNode element);
-
-/**
- * @brief Initialize the label rendering subsystem.
- *
- * Sets up the label renderer appropriate for the given output format
- * and environment (e.g., MathJax for SVG, tactile renderer for embossed).
- *
- * @param format      The output format (SVG or Tactile).
- * @param environment The host environment.
- *
- * @note Currently a stub implementation.
- */
+/// Initialize the label rendering subsystem with appropriate backends.
 void init(OutputFormat format, Environment environment);
 
-/**
- * @brief Register LaTeX macro definitions for label rendering.
- *
- * @param macros A string of LaTeX macro definitions (from the publication file).
- *
- * @note Currently a stub implementation.
- */
+/// Register LaTeX macro definitions for label rendering.
 void add_macros(const std::string& macros);
+
+/// Check whether an XML tag is a label sub-element (it, b, newline).
+bool is_label_tag(const std::string& tag);
+
+/// Evaluate ${...} expression substitutions in text using the given expression context.
+std::string evaluate_text(const std::string& text, ExpressionContext& ctx);
+
+/// Process a <label> element: register it for deferred placement.
+void label_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status);
+
+/// Position all deferred labels within the diagram (called during finalization).
+void place_labels(Diagram& diagram, const std::string& filename, XmlNode root,
+                  std::unordered_map<size_t, std::tuple<XmlNode, XmlNode, CTM>>& label_group_dict);
+
+/// Process a <caption> element.
+void caption(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status);
+
+/// Compute alignment from a direction vector (8-point compass).
+std::string get_alignment_from_direction(const Point2d& direction);
+
+/// Snap a coordinate to the 20dpi embossing grid (3.6pt spacing).
+double snap_to_embossing_grid(double x);
+
+// ---------------------------------------------------------------------------
+// Constants (alignment lookup tables)
+// ---------------------------------------------------------------------------
+
+/// Alignment displacement for SVG labels (fractional offsets for 3x3 grid).
+const std::unordered_map<std::string, std::array<double, 2>>& alignment_displacement_map();
+
+/// Alignment displacement for braille labels.
+const std::unordered_map<std::string, std::array<double, 2>>& braille_displacement_map();
+
+/// Access the global math labels backend.
+AbstractMathLabels* get_math_labels();
+
+/// Access the global text measurements backend.
+AbstractTextMeasurements* get_text_measurements();
+
+/// Access the global braille translator backend.
+AbstractBrailleTranslator* get_braille_translator();
 
 }  // namespace prefigure

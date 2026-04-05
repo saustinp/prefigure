@@ -316,4 +316,26 @@ double intersect(
     return (x1 + x2) / 2.0;
 }
 
+// --- Utility: append and zip ---
+
+Eigen::VectorXd vec_append(const Eigen::VectorXd& input, double item) {
+    Eigen::VectorXd result(input.size() + 1);
+    result.head(input.size()) = input;
+    result[input.size()] = item;
+    return result;
+}
+
+std::vector<Eigen::VectorXd> zip_lists(const Eigen::VectorXd& a, const Eigen::VectorXd& b) {
+    Eigen::Index n = std::min(a.size(), b.size());
+    std::vector<Eigen::VectorXd> result;
+    result.reserve(static_cast<size_t>(n));
+    for (Eigen::Index i = 0; i < n; ++i) {
+        Eigen::VectorXd pair(2);
+        pair[0] = a[i];
+        pair[1] = b[i];
+        result.push_back(pair);
+    }
+    return result;
+}
+
 }  // namespace prefigure

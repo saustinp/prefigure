@@ -113,3 +113,58 @@ TEST_CASE("ExpressionContext enter_namespace and retrieve", "[user_namespace]") 
     REQUIRE(v.is_double());
     REQUIRE_THAT(v.as_double(), WithinAbs(42.0, 1e-10));
 }
+
+TEST_CASE("User-defined function calls in expressions", "[user_namespace]") {
+    ExpressionContext ctx;
+
+    SECTION("simple function call: f(3)") {
+        ctx.define("f(x) = x^2");
+        auto v = ctx.eval("f(3)");
+        REQUIRE(v.is_double());
+        REQUIRE_THAT(v.as_double(), WithinAbs(9.0, 1e-10));
+    }
+
+    SECTION("function call with arithmetic argument: f(3+1)") {
+        ctx.define("f(x) = x^2");
+        auto v = ctx.eval("f(3+1)");
+        REQUIRE(v.is_double());
+        REQUIRE_THAT(v.as_double(), WithinAbs(16.0, 1e-10));
+    }
+
+    SECTION("compound expression: f(3) + 2") {
+        ctx.define("f(x) = x^2");
+        auto v = ctx.eval("f(3) + 2");
+        REQUIRE(v.is_double());
+        REQUIRE_THAT(v.as_double(), WithinAbs(11.0, 1e-10));
+    }
+
+    SECTION("nested function calls: f(g(2))") {
+        ctx.define("g(x) = x + 1");
+        ctx.define("f(x) = x^2");
+        auto v = ctx.eval("f(g(2))");
+        REQUIRE(v.is_double());
+        REQUIRE_THAT(v.as_double(), WithinAbs(9.0, 1e-10));
+    }
+
+    SECTION("two-arg function: h(2, 3)") {
+        ctx.define("h(x, y) = x + y");
+        auto v = ctx.eval("h(2, 3)");
+        REQUIRE(v.is_double());
+        REQUIRE_THAT(v.as_double(), WithinAbs(5.0, 1e-10));
+    }
+
+    SECTION("function call with variable: f(a) after a=4") {
+        ctx.define("f(x) = x^2 + 1");
+        ctx.define("a = 4");
+        auto v = ctx.eval("f(a)");
+        REQUIRE(v.is_double());
+        REQUIRE_THAT(v.as_double(), WithinAbs(17.0, 1e-10));
+    }
+
+    SECTION("multiple function calls: f(2) + f(3)") {
+        ctx.define("f(x) = x^2");
+        auto v = ctx.eval("f(2) + f(3)");
+        REQUIRE(v.is_double());
+        REQUIRE_THAT(v.as_double(), WithinAbs(13.0, 1e-10));
+    }
+}

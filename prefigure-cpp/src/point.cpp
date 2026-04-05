@@ -25,18 +25,6 @@ static const std::unordered_map<std::string, std::pair<double, double>> alignmen
     {"sw", {-1, 0}},          {"s", {-0.5, 0}},         {"c", {-0.5, 0.5}},
 };
 
-static const std::vector<std::string> alignment_circle = {
-    "east", "northeast", "north", "northwest",
-    "west", "southwest", "south", "southeast"
-};
-
-static std::string get_alignment_from_direction(const Point2d& direction) {
-    double angle = std::atan2(direction[1], direction[0]) * 180.0 / M_PI;
-    int align = static_cast<int>(std::round(angle / 45.0)) % 8;
-    if (align < 0) align += 8;
-    return alignment_circle[align];
-}
-
 // Forward declarations
 static void finish_outline_point(XmlNode element, Diagram& diagram, XmlNode parent);
 static XmlNode add_label_to_point(XmlNode element, Diagram& diagram, XmlNode parent);

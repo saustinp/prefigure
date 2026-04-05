@@ -202,6 +202,10 @@ private:
     // Pre-process expression: handle ^ substitution, detect tuples
     std::string preprocess(const std::string& expr, bool substitution) const;
 
+    // Replace user-defined function calls in an expression with their
+    // evaluated numeric results so that exprtk can handle the rest.
+    std::string replace_function_calls(const std::string& expr);
+
     // Evaluate a scalar expression using exprtk
     double eval_scalar(const std::string& expr) const;
 

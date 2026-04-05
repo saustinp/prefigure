@@ -412,7 +412,7 @@ void Diagram::parse(std::optional<XmlNode> element_opt,
         } catch (const std::exception& e) {
             spdlog::error("Error in parsing element {}", tag);
             spdlog::error("{}", e.what());
-            return;
+            continue;  // Continue with next sibling, don't abort entire parse
         }
 
         // Handle annotate='yes'
@@ -431,11 +431,11 @@ void Diagram::parse(std::optional<XmlNode> element_opt,
                 // Evaluate text and speech
                 auto text_attr = annotation.attribute("text");
                 if (text_attr) {
-                    text_attr.set_value(evaluate_text(text_attr.value()).c_str());
+                    text_attr.set_value(evaluate_text(text_attr.value(), expr_ctx_).c_str());
                 }
                 auto speech_attr = annotation.attribute("speech");
                 if (speech_attr) {
-                    speech_attr.set_value(evaluate_text(speech_attr.value()).c_str());
+                    speech_attr.set_value(evaluate_text(speech_attr.value(), expr_ctx_).c_str());
                 }
                 add_annotation_to_branch(annotation);
             }
@@ -444,9 +444,7 @@ void Diagram::parse(std::optional<XmlNode> element_opt,
 }
 
 void Diagram::place_labels() {
-    // Stub: label placement will be fully implemented when label module is complete
-    // label::place_labels(*this, filename_, root_, label_group_dict_, label_html_tree_);
-    // For now, do nothing
+    prefigure::place_labels(*this, filename_, root_, label_group_dict_);
 }
 
 void Diagram::end_figure() {
@@ -726,16 +724,15 @@ Environment Diagram::get_environment() const {
 }
 
 void Diagram::register_svg_element(XmlNode source, XmlNode svg, bool overwrite) {
-    // In the Python version, this links source elements to their SVG counterparts
-    // through a copy mechanism. In C++, we store by node hash.
-    // This is used for the playground's source annotation feature.
-    (void)source; (void)svg; (void)overwrite;
-    // Stub: full implementation requires the source_to_copy mechanism
+    size_t key = source.hash_value();
+    if (overwrite || source_to_svg_map_.find(key) == source_to_svg_map_.end()) {
+        source_to_svg_map_[key] = svg;
+    }
 }
 
 void Diagram::add_label(XmlNode element, XmlNode group) {
     size_t key = element.hash_value();
-    label_group_dict_[key] = {group, ctm().copy()};
+    label_group_dict_[key] = std::make_tuple(element, group, ctm().copy());
 }
 
 void Diagram::register_label_dims(XmlNode element, std::pair<double, double> dims) {
@@ -751,8 +748,24 @@ std::pair<double, double> Diagram::get_label_dims(XmlNode element) {
     return it->second;
 }
 
-void Diagram::add_legend(/* Legend& */) {
-    // TODO: implement when Legend class is available
+void Diagram::add_legend(void* legend) {
+    legends_.push_back(legend);
+}
+
+std::tuple<XmlNode, XmlNode, CTM> Diagram::get_label_group(XmlNode element) {
+    auto it = label_group_dict_.find(element.hash_value());
+    if (it != label_group_dict_.end()) {
+        return it->second;
+    }
+    return {XmlNode(), XmlNode(), CTM()};
+}
+
+std::unordered_map<size_t, std::tuple<XmlNode, XmlNode, CTM>>& Diagram::get_label_group_dict() {
+    return label_group_dict_;
+}
+
+const std::unordered_map<size_t, XmlNode>& Diagram::get_source_to_svg_map() const {
+    return source_to_svg_map_;
 }
 
 void Diagram::add_shape(XmlNode shape_node) {

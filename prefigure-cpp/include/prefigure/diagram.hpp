@@ -7,6 +7,7 @@
 #include <array>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -344,9 +345,28 @@ public:
     std::pair<double, double> get_label_dims(XmlNode element);
 
     /**
-     * @brief Register a legend entry (stub -- not yet implemented).
+     * @brief Register a legend for deferred placement.
+     * @param legend Pointer to the Legend object (diagram does NOT own it).
      */
-    void add_legend(/* Legend& */);
+    void add_legend(void* legend);
+
+    /**
+     * @brief Retrieve the label group and CTM for a given source element.
+     * @param element The source XML element.
+     * @return (group, CTM) pair, or null group if not found.
+     */
+    std::tuple<XmlNode, XmlNode, CTM> get_label_group(XmlNode element);
+
+    /**
+     * @brief Get a mutable reference to the label group dictionary.
+     * @return Reference to the map keyed by element hash_value.
+     */
+    std::unordered_map<size_t, std::tuple<XmlNode, XmlNode, CTM>>& get_label_group_dict();
+
+    /**
+     * @brief Get the source-to-SVG element mapping.
+     */
+    const std::unordered_map<size_t, XmlNode>& get_source_to_svg_map() const;
 
     // -- Shape dictionary ---------------------------------------------------
 
@@ -637,14 +657,17 @@ private:
     std::unordered_map<size_t, Value> saved_data_;
 
     // Label management
-    std::unordered_map<size_t, std::pair<XmlNode, CTM>> label_group_dict_;
+    std::unordered_map<size_t, std::tuple<XmlNode, XmlNode, CTM>> label_group_dict_;
     std::unordered_map<size_t, std::pair<double, double>> label_dims_;
 
     // Network coordinates
     std::unordered_map<std::string, Value> network_coords_;
 
-    // Legends (stub for now)
-    // std::vector<Legend> legends_;
+    // Legends
+    std::vector<void*> legends_;
+
+    // Source element to SVG element mapping
+    std::unordered_map<size_t, XmlNode> source_to_svg_map_;
 };
 
 }  // namespace prefigure

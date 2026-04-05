@@ -83,6 +83,37 @@ TEST_CASE("Bezier evaluation", "[math_utilities]") {
     REQUIRE_THAT(mid[1], WithinAbs(1.0, 1e-10));
 }
 
+TEST_CASE("vec_append", "[math_utilities]") {
+    Eigen::VectorXd v(3);
+    v << 1.0, 2.0, 3.0;
+    auto result = vec_append(v, 4.0);
+    REQUIRE(result.size() == 4);
+    REQUIRE_THAT(result[0], WithinAbs(1.0, 1e-10));
+    REQUIRE_THAT(result[3], WithinAbs(4.0, 1e-10));
+}
+
+TEST_CASE("zip_lists", "[math_utilities]") {
+    Eigen::VectorXd a(3), b(3);
+    a << 1.0, 2.0, 3.0;
+    b << 4.0, 5.0, 6.0;
+    auto result = zip_lists(a, b);
+    REQUIRE(result.size() == 3);
+    REQUIRE_THAT(result[0][0], WithinAbs(1.0, 1e-10));
+    REQUIRE_THAT(result[0][1], WithinAbs(4.0, 1e-10));
+    REQUIRE_THAT(result[2][0], WithinAbs(3.0, 1e-10));
+    REQUIRE_THAT(result[2][1], WithinAbs(6.0, 1e-10));
+}
+
+TEST_CASE("zip_lists unequal lengths", "[math_utilities]") {
+    Eigen::VectorXd a(2), b(4);
+    a << 1.0, 2.0;
+    b << 10.0, 20.0, 30.0, 40.0;
+    auto result = zip_lists(a, b);
+    REQUIRE(result.size() == 2);
+    REQUIRE_THAT(result[1][0], WithinAbs(2.0, 1e-10));
+    REQUIRE_THAT(result[1][1], WithinAbs(20.0, 1e-10));
+}
+
 TEST_CASE("line intersection", "[math_utilities]") {
     Eigen::VectorXd p1(2), p2(2), q1(2), q2(2);
     p1 << 0.0, 0.0; p2 << 2.0, 2.0;

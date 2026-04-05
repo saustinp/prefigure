@@ -1,6 +1,5 @@
 #include "prefigure/ctm.hpp"
 #include "prefigure/diagram.hpp"
-#include "prefigure/group.hpp"
 #include "prefigure/utilities.hpp"
 #include "prefigure/user_namespace.hpp"
 
@@ -172,59 +171,101 @@ CTM CTM::copy() const {
 
 // --- Transform element handlers ---
 // These are registered in the tag dispatcher as "transform", "translate", etc.
+// They evaluate expressions via the diagram's ExpressionContext and update the CTM.
+//
+// Architecture (matching Python):
+//   transform_group: pushes/pops CTM and delegates child processing via diagram.parse()
+//   transform_translate/rotate/scale: push CTM, apply the specific transform, parse children, pop CTM
 
 void transform_group(XmlNode element, Diagram& diagram, XmlNode root, OutlineStatus status) {
-    // <transform> is treated like <group> with a @transform attribute
-    // The Python CTM.transform_group delegates to group.group
-    // For now, just delegate to the group handler
-    group(element, diagram, root, status);
+    // Push CTM, process children, then pop CTM.
+    if (status != OutlineStatus::FinishOutline) {
+        diagram.ctm().push();
+    }
+    diagram.parse(element, root, status);
+    if (status != OutlineStatus::FinishOutline) {
+        diagram.ctm().pop();
+    }
 }
 
+// Python: translate/rotate/scale are FIRE-AND-FORGET — they permanently
+// modify the current CTM and do NOT process children or push/pop.
+// Only transform_group does push/pop/parse.
+
 void transform_translate(XmlNode element, Diagram& diagram, XmlNode root, OutlineStatus status) {
-    // <translate> is just a <group> with transform="translate(...)"
-    // Build the transform string from the element's attributes and delegate
+    (void)root;
+    if (status == OutlineStatus::FinishOutline) return;
     auto by_attr = element.attribute("by");
     if (!by_attr) {
         spdlog::error("A <translate> element needs a @by attribute");
         return;
     }
-    std::string transform_str = std::string("translate(") + by_attr.value() + ")";
-    if (element.attribute("transform")) {
-        element.attribute("transform").set_value(transform_str.c_str());
-    } else {
-        element.append_attribute("transform").set_value(transform_str.c_str());
+    try {
+        Value p = diagram.expr_ctx().eval(by_attr.value());
+        if (p.is_vector() && p.as_vector().size() >= 2) {
+            diagram.ctm().translate(p.as_vector()[0], p.as_vector()[1]);
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("Error in <translate> parsing by={}: {}", by_attr.value(), e.what());
     }
-    group(element, diagram, root, status);
 }
 
 void transform_rotate(XmlNode element, Diagram& diagram, XmlNode root, OutlineStatus status) {
+    (void)root;
+    if (status == OutlineStatus::FinishOutline) return;
     auto by_attr = element.attribute("by");
     if (!by_attr) {
         spdlog::error("A <rotate> element needs a @by attribute");
         return;
     }
-    std::string transform_str = std::string("rotate(") + by_attr.value() + ")";
-    if (element.attribute("transform")) {
-        element.attribute("transform").set_value(transform_str.c_str());
-    } else {
-        element.append_attribute("transform").set_value(transform_str.c_str());
+    try {
+        Value angle_val = diagram.expr_ctx().eval(by_attr.value());
+        double angle = angle_val.to_double();
+
+        double cx = 0.0, cy = 0.0;
+        auto about_attr = element.attribute("about");
+        if (about_attr) {
+            Value about_val = diagram.expr_ctx().eval(about_attr.value());
+            if (about_val.is_vector() && about_val.as_vector().size() >= 2) {
+                cx = about_val.as_vector()[0];
+                cy = about_val.as_vector()[1];
+            }
+        }
+
+        std::string units = "deg";
+        auto deg_attr = element.attribute("degrees");
+        if (deg_attr && std::string(deg_attr.value()) == "no") {
+            units = "rad";
+        }
+
+        auto& ctm = diagram.ctm();
+        ctm.translate(cx, cy);
+        ctm.rotate(angle, units);
+        ctm.translate(-cx, -cy);
+    } catch (const std::exception& e) {
+        spdlog::error("Error in <rotate> parsing by={}: {}", by_attr.value(), e.what());
     }
-    group(element, diagram, root, status);
 }
 
 void transform_scale(XmlNode element, Diagram& diagram, XmlNode root, OutlineStatus status) {
+    (void)root;
+    if (status == OutlineStatus::FinishOutline) return;
     auto by_attr = element.attribute("by");
     if (!by_attr) {
         spdlog::error("A <scale> element needs a @by attribute");
         return;
     }
-    std::string transform_str = std::string("scale(") + by_attr.value() + ")";
-    if (element.attribute("transform")) {
-        element.attribute("transform").set_value(transform_str.c_str());
-    } else {
-        element.append_attribute("transform").set_value(transform_str.c_str());
+    try {
+        Value s = diagram.expr_ctx().eval(by_attr.value());
+        if (s.is_vector() && s.as_vector().size() >= 2) {
+            diagram.ctm().scale(s.as_vector()[0], s.as_vector()[1]);
+        } else {
+            double sv = s.to_double();
+            diagram.ctm().scale(sv, sv);
+        }
+    } catch (const std::exception& e) {
+        spdlog::error("Error in <scale> parsing by={}: {}", by_attr.value(), e.what());
     }
-    group(element, diagram, root, status);
 }
 
 }  // namespace prefigure

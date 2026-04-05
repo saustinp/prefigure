@@ -218,11 +218,11 @@ void repeat_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
         }
         auto text_a = annotation.attribute("text");
         if (text_a) {
-            text_a.set_value(evaluate_text(text_a.value()).c_str());
+            text_a.set_value(evaluate_text(text_a.value(), diagram.expr_ctx()).c_str());
         }
         auto speech_a = annotation.attribute("speech");
         if (speech_a) {
-            speech_a.set_value(evaluate_text(speech_a.value()).c_str());
+            speech_a.set_value(evaluate_text(speech_a.value(), diagram.expr_ctx()).c_str());
         }
         diagram.push_to_annotation_branch(annotation);
         has_annotation = true;

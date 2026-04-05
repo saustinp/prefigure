@@ -309,4 +309,27 @@ double intersect(
     double interval_min,
     double interval_max);
 
+// -- Utility: append and zip -----------------------------------------------
+
+/**
+ * @brief Append a scalar to the end of a vector, returning a new vector.
+ *
+ * @param input The original vector.
+ * @param item  The scalar value to append.
+ * @return A new vector of size input.size() + 1.
+ */
+Eigen::VectorXd vec_append(const Eigen::VectorXd& input, double item);
+
+/**
+ * @brief Zip two vectors into pairs, stored as a vector of 2-element vectors.
+ *
+ * The output length is min(a.size(), b.size()).  Each element of the
+ * result is a 2D vector [a[i], b[i]].
+ *
+ * @param a First input vector.
+ * @param b Second input vector.
+ * @return A vector of 2-element Eigen::VectorXd.
+ */
+std::vector<Eigen::VectorXd> zip_lists(const Eigen::VectorXd& a, const Eigen::VectorXd& b);
+
 }  // namespace prefigure
