@@ -298,6 +298,12 @@ public:
     OutputFormat output_format() const;
 
     /**
+     * @brief Set the output format (used temporarily during shape definitions).
+     * @param fmt The new OutputFormat.
+     */
+    void set_output_format(OutputFormat fmt);
+
+    /**
      * @brief Get the host environment.
      * @return The Environment enum value.
      */

@@ -8,7 +8,7 @@ void bind_diagram(py::module_& m);
 void bind_parse(py::module_& m);
 
 PYBIND11_MODULE(_prefigure, m) {
-    m.doc() = "PreFigure C++ backend";
+    m.doc() = "PreFigure C++ backend — high-performance diagram rendering";
 
     bind_types(m);
     bind_diagram(m);

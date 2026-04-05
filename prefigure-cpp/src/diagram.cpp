@@ -719,6 +719,10 @@ OutputFormat Diagram::output_format() const {
     return format_;
 }
 
+void Diagram::set_output_format(OutputFormat fmt) {
+    format_ = fmt;
+}
+
 Environment Diagram::get_environment() const {
     return environment_;
 }

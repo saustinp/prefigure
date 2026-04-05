@@ -147,7 +147,8 @@ struct Value {
         std::string,                 // string (e.g., color "#ff0000")
         MathFunction,                // single-arg function
         MathFunction2,               // two-arg function (for ODEs: f(t, y))
-        std::vector<std::string>     // string array
+        std::vector<std::string>,    // string array
+        Eigen::MatrixXd              // 2D matrix (e.g., ODE solution)
     > data;
 
     /** @brief Construct an empty (monostate) value. */
@@ -170,6 +171,9 @@ struct Value {
 
     /** @brief Construct a string-array value. */
     Value(const std::vector<std::string>& v) : data(v) {}
+
+    /** @brief Construct a 2D matrix value (e.g., ODE solution). */
+    Value(const Eigen::MatrixXd& m) : data(m) {}
 
     /**
      * @brief Convenience constructor: promotes int to double.
@@ -201,6 +205,9 @@ struct Value {
     /** @brief Return true if this value holds a two-argument function. */
     bool is_function2() const { return std::holds_alternative<MathFunction2>(data); }
 
+    /** @brief Return true if this value holds a 2D matrix. */
+    bool is_matrix() const { return std::holds_alternative<Eigen::MatrixXd>(data); }
+
     /**
      * @brief Get the scalar double.
      * @throws std::bad_variant_access if the active alternative is not double.
@@ -230,6 +237,12 @@ struct Value {
      * @throws std::bad_variant_access if the active alternative is not MathFunction2.
      */
     const MathFunction2& as_function2() const { return std::get<MathFunction2>(data); }
+
+    /**
+     * @brief Get a const reference to the 2D matrix.
+     * @throws std::bad_variant_access if the active alternative is not MatrixXd.
+     */
+    const Eigen::MatrixXd& as_matrix() const { return std::get<Eigen::MatrixXd>(data); }
 
     /**
      * @brief Extract this value as a 2D point.

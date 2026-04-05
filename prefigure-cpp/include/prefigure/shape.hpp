@@ -4,21 +4,21 @@
 
 #ifdef PREFIGURE_HAS_SHAPES
 
+#include <string>
+#include <vector>
+
 namespace prefigure {
 
 /**
- * @brief Render a `<shape-define>` XML element by registering a named shape.
+ * @brief Render a `<define-shapes>` XML element by registering named shapes.
  *
- * Creates an SVG path from the element's attributes and registers it in
- * the diagram's shape dictionary for later use by `<clip>` and `<shape>`
- * elements.
+ * Iterates over child elements, renders each to SVG via tags::parse_element,
+ * strips stroke/fill, and stores the resulting `<path>` in the diagram's
+ * shape dictionary for later use by `<shape>` elements.
  *
- * @par XML Attributes
- * - `id` (required): Unique identifier for the shape.
- * - Shape definition attributes (implementation-specific).
- *
- * @par SVG Output
- * Adds a `<path>` to `<defs>` and the shape dictionary; no visible output.
+ * @par Allowed child tags
+ * arc, area-between-curves, area-under-curve, circle, ellipse, graph,
+ * parametric-curve, path, polygon, rectangle, shape, spline
  *
  * @param element Source XML element.
  * @param diagram Parent diagram context.
@@ -32,23 +32,28 @@ void shape_define(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStat
 /**
  * @brief Render a `<shape>` XML element as SVG.
  *
- * Draws a previously defined shape at a specified position, or uses the
- * shape as a `<use>` reference.
+ * Recalls previously defined shapes by ID, optionally applies a boolean
+ * geometry operation (union, intersection, difference, symmetric-difference,
+ * convex-hull), and creates the resulting SVG `<path>`.
+ *
+ * Boolean operations use the GEOS C API to perform computational geometry.
+ * SVG path `d` attributes are parsed into GEOS polygons (with Bezier curves
+ * discretized), the operation is applied, and the result is converted back
+ * to an SVG path string.
  *
  * @par XML Attributes
- * - `shape` (required): ID of a previously defined shape.
- * - `at` (optional): Position to place the shape.
- * - `stroke`, `fill`, etc.: Standard styling attributes.
- *
- * @par SVG Output
- * Creates a `<use>` element referencing the shape definition in `<defs>`.
+ * - `shape` or `shapes` (required): Comma-separated list of shape IDs.
+ * - `operation` (optional): "union", "intersection", "difference",
+ *   "symmetric-difference"/"sym-diff", or "convex-hull".
+ *   Defaults to "union" when multiple shapes are given.
+ * - `stroke`, `fill`, `thickness`, etc.: Standard styling attributes.
  *
  * @param element Source XML element.
  * @param diagram Parent diagram context.
  * @param parent  SVG parent node for appending output.
  * @param status  Outline rendering pass.
  *
- * @see Diagram::get_shape()
+ * @see Diagram::recall_shape(), shape_define()
  */
 void shape(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status);
 

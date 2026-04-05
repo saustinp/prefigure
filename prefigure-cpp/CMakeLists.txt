@@ -74,7 +74,7 @@ if(PREFIGURE_WITH_DIFFEQS OR PREFIGURE_WITH_NETWORK)
             URL https://github.com/boostorg/boost/releases/download/boost-1.85.0/boost-1.85.0-cmake.tar.gz
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE
         )
-        set(BOOST_INCLUDE_LIBRARIES graph numeric odeint CACHE STRING "" FORCE)
+        set(BOOST_INCLUDE_LIBRARIES graph CACHE STRING "" FORCE)
         FetchContent_MakeAvailable(boost)
     endif()
 endif()
@@ -202,6 +202,8 @@ if(PREFIGURE_WITH_DIFFEQS)
     elseif(Boost_FOUND)
         target_include_directories(prefigure PUBLIC ${Boost_INCLUDE_DIRS})
     endif()
+    # ODE integration is implemented directly (Dormand-Prince RK45) to avoid
+    # pulling in the transitive dependency tree of Boost.Odeint.
 endif()
 
 if(PREFIGURE_WITH_NETWORK)
