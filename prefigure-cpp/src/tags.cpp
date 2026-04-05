@@ -5,6 +5,8 @@
 #include "prefigure/circle.hpp"
 #include "prefigure/clip.hpp"
 #include "prefigure/coordinates.hpp"
+#include "prefigure/ctm.hpp"
+#include "prefigure/definition.hpp"
 #include "prefigure/graph.hpp"
 #include "prefigure/grid_axes.hpp"
 #include "prefigure/group.hpp"
@@ -26,6 +28,8 @@
 #include "prefigure/tangent_line.hpp"
 #include "prefigure/vector_element.hpp"
 
+#include <spdlog/spdlog.h>
+
 #ifdef PREFIGURE_HAS_DIFFEQS
 #include "prefigure/diffeqs.hpp"
 #endif
@@ -39,72 +43,134 @@
 #endif
 
 namespace prefigure {
+namespace tags {
+
+// Helper to wrap a function pointer into ElementHandler
+static ElementHandler wrap(void(*fn)(XmlNode, Diagram&, XmlNode, OutlineStatus)) {
+    return fn;
+}
 
 const TagDict& get_tag_dict() {
     static const TagDict dict = {
-        {"annotations",       annotations},
-        {"label",             label_element},
-        {"caption",           caption},
-        {"legend",            legend_element},
-        {"clip",              clip},
-        {"group",             group},
-        {"repeat",            repeat_element},
-        {"read",              read},
-        {"image",             image},
-        {"graph",             graph},
-        {"area-between",      area_between_curves},
-        {"area-under",        area_under_curve},
-        {"circle",            circle_element},
-        {"ellipse",           ellipse},
-        {"arc",               arc},
-        {"angle-marker",      angle_marker},
-        {"line",              line},
-        {"point",             point},
-        {"polygon",           polygon_element},
-        {"spline",            spline},
-        {"triangle",          triangle},
-        {"rectangle",         rectangle},
-        {"path",              path_element},
-        {"vector",            vector_element},
-        {"parametric-curve",  parametric_curve},
-        {"tangent-line",      tangent},
-        {"implicit-curve",    implicit_curve},
-        {"riemann-sum",       riemann_sum},
-        {"slope-field",       slope_field},
-        {"vector-field",      vector_field},
-        {"scatter",           scatter},
-        {"histogram",         histogram},
-        {"axes",              axes},
-        {"tick-mark",         tick_mark},
-        {"grid",              grid},
-        {"grid-axes",         grid_axes},
-        {"coordinates",       coordinates},
+        {"angle-marker",      wrap(angle_marker)},
+        {"annotations",       wrap(annotations)},
+        {"arc",               wrap(arc)},
+        {"area-between",      wrap(area_between_curves)},
+        {"area-between-curves", wrap(area_between_curves)},
+        {"area-under",        wrap(area_under_curve)},
+        {"area-under-curve",  wrap(area_under_curve)},
+        {"axes",              wrap(axes)},
+        {"caption",           wrap(caption)},
+        {"circle",            wrap(circle_element)},
+        {"clip",              wrap(clip)},
+        {"contour",           wrap(implicit_curve)},
+        {"coordinates",       wrap(coordinates)},
+        {"definition",        wrap(definition)},
+        {"derivative",        wrap(definition_derivative)},
+        {"ellipse",           wrap(ellipse)},
+        {"graph",             wrap(graph)},
+        {"grid",              wrap(grid)},
+        {"grid-axes",         wrap(grid_axes)},
+        {"group",             wrap(group)},
+        {"histogram",         wrap(histogram)},
+        {"image",             wrap(image)},
+        {"implicit-curve",    wrap(implicit_curve)},
+        {"label",             wrap(label_element)},
+        {"legend",            wrap(legend_element)},
+        {"line",              wrap(line)},
+        {"parametric-curve",  wrap(parametric_curve)},
+        {"path",              wrap(path_element)},
+        {"point",             wrap(point)},
+        {"polygon",           [](XmlNode e, Diagram& d, XmlNode p, OutlineStatus s) { polygon_element(e, d, p, s); }},
+        {"read",              wrap(read)},
+        {"rectangle",         wrap(rectangle)},
+        {"repeat",            wrap(repeat_element)},
+        {"riemann-sum",       wrap(riemann_sum)},
+        {"rotate",            wrap(transform_rotate)},
+        {"scale",             wrap(transform_scale)},
+        {"scatter",           wrap(scatter)},
+        {"slope-field",       wrap(slope_field)},
+        {"spline",            wrap(spline)},
+        {"tangent-line",      wrap(tangent)},
+        {"tick-mark",         wrap(tick_mark)},
+        {"transform",         wrap(transform_group)},
+        {"translate",         wrap(transform_translate)},
+        {"triangle",          wrap(triangle)},
+        {"vector",            wrap(vector_element)},
+        {"vector-field",      wrap(vector_field)},
 
 #ifdef PREFIGURE_HAS_DIFFEQS
-        {"de-solve",          de_solve},
-        {"plot-de-solution",  plot_de_solution},
+        {"de-solve",          wrap(de_solve)},
+        {"plot-de-solution",  wrap(plot_de_solution)},
 #endif
 
 #ifdef PREFIGURE_HAS_NETWORK
-        {"network",           network},
+        {"network",           wrap(network)},
 #endif
 
 #ifdef PREFIGURE_HAS_SHAPES
-        {"shape-define",      shape_define},
-        {"shape",             shape},
+        {"define-shapes",     wrap(shape_define)},
+        {"shape",             wrap(shape)},
 #endif
     };
     return dict;
 }
 
 void parse_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status) {
-    const auto& dict = get_tag_dict();
-    std::string tag = element.name();
-    auto it = dict.find(tag);
-    if (it != dict.end()) {
-        it->second(element, diagram, parent, status);
+    // Skip comments
+    if (element.type() == pugi::node_comment) {
+        return;
     }
-    // Unknown tags are silently ignored
+
+    std::string tag = element.name();
+
+    // Check for misplaced tags
+    if (is_path_tag(tag)) {
+        spdlog::warn("A <{}> tag can only occur inside a <path>", tag);
+        return;
+    }
+    if (is_label_tag(tag)) {
+        spdlog::warn("A <{}> tag can only occur inside a <label>", tag);
+        return;
+    }
+    if (is_axes_tag(tag)) {
+        spdlog::warn("A <{}> tag can only occur inside a <axes> or <grid-axes>", tag);
+        return;
+    }
+
+    const auto& dict = get_tag_dict();
+    auto it = dict.find(tag);
+    if (it == dict.end()) {
+        spdlog::error("Unknown element tag: {}", tag);
+        return;
+    }
+
+    // Debug logging
+    if (tag == "definition") {
+        auto text = element.child_value();
+        if (!text || std::string(text).empty()) {
+            spdlog::error("PreFigure is ignoring an empty definition");
+            return;
+        }
+        std::string trimmed = text;
+        auto start = trimmed.find_first_not_of(" \t\n\r");
+        auto end = trimmed.find_last_not_of(" \t\n\r");
+        if (start != std::string::npos) {
+            trimmed = trimmed.substr(start, end - start + 1);
+        }
+        spdlog::debug("Processing definition: {}", trimmed);
+    } else {
+        std::string msg = "Processing element " + tag;
+        auto at = element.attribute("at");
+        if (at) {
+            msg += " with handle ";
+            msg += at.value();
+        }
+        spdlog::debug("{}", msg);
+    }
+
+    it->second(element, diagram, parent, status);
 }
 
+}  // namespace tags
 }  // namespace prefigure

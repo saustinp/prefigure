@@ -1,4 +1,8 @@
 #include "prefigure/ctm.hpp"
+#include "prefigure/diagram.hpp"
+#include "prefigure/group.hpp"
+#include "prefigure/utilities.hpp"
+#include "prefigure/user_namespace.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -41,7 +45,6 @@ AffineMatrix affine_build_matrix(double m00, double m01, double m10, double m11)
 
 AffineMatrix affine_concat(const AffineMatrix& m, const AffineMatrix& n) {
     // Treat n as a 3x3 matrix (with implicit [0,0,1] bottom row)
-    // c[col] = column of n transposed for dot products
     std::array<double, 3> c0 = {n[0][0], n[1][0], 0};
     std::array<double, 3> c1 = {n[0][1], n[1][1], 0};
     std::array<double, 3> c2 = {n[0][2], n[1][2], 1};
@@ -163,29 +166,65 @@ CTM CTM::copy() const {
     result.scale_y_ = scale_y_;
     result.inv_scale_x_ = inv_scale_x_;
     result.inv_scale_y_ = inv_scale_y_;
-    // Don't copy the stack — matches Python's deepcopy behavior
+    // Don't copy the stack -- matches Python's deepcopy behavior
     return result;
 }
 
 // --- Transform element handlers ---
-// These are stubs that will be fully implemented once Diagram and
-// ExpressionContext are available. The signatures match the tag dispatcher.
+// These are registered in the tag dispatcher as "transform", "translate", etc.
 
 void transform_group(XmlNode element, Diagram& diagram, XmlNode root, OutlineStatus status) {
-    // Will be implemented in Phase 2 when diagram.hpp is available
-    (void)element; (void)diagram; (void)root; (void)status;
+    // <transform> is treated like <group> with a @transform attribute
+    // The Python CTM.transform_group delegates to group.group
+    // For now, just delegate to the group handler
+    group(element, diagram, root, status);
 }
 
 void transform_translate(XmlNode element, Diagram& diagram, XmlNode root, OutlineStatus status) {
-    (void)element; (void)diagram; (void)root; (void)status;
+    // <translate> is just a <group> with transform="translate(...)"
+    // Build the transform string from the element's attributes and delegate
+    auto by_attr = element.attribute("by");
+    if (!by_attr) {
+        spdlog::error("A <translate> element needs a @by attribute");
+        return;
+    }
+    std::string transform_str = std::string("translate(") + by_attr.value() + ")";
+    if (element.attribute("transform")) {
+        element.attribute("transform").set_value(transform_str.c_str());
+    } else {
+        element.append_attribute("transform").set_value(transform_str.c_str());
+    }
+    group(element, diagram, root, status);
 }
 
 void transform_rotate(XmlNode element, Diagram& diagram, XmlNode root, OutlineStatus status) {
-    (void)element; (void)diagram; (void)root; (void)status;
+    auto by_attr = element.attribute("by");
+    if (!by_attr) {
+        spdlog::error("A <rotate> element needs a @by attribute");
+        return;
+    }
+    std::string transform_str = std::string("rotate(") + by_attr.value() + ")";
+    if (element.attribute("transform")) {
+        element.attribute("transform").set_value(transform_str.c_str());
+    } else {
+        element.append_attribute("transform").set_value(transform_str.c_str());
+    }
+    group(element, diagram, root, status);
 }
 
 void transform_scale(XmlNode element, Diagram& diagram, XmlNode root, OutlineStatus status) {
-    (void)element; (void)diagram; (void)root; (void)status;
+    auto by_attr = element.attribute("by");
+    if (!by_attr) {
+        spdlog::error("A <scale> element needs a @by attribute");
+        return;
+    }
+    std::string transform_str = std::string("scale(") + by_attr.value() + ")";
+    if (element.attribute("transform")) {
+        element.attribute("transform").set_value(transform_str.c_str());
+    } else {
+        element.append_attribute("transform").set_value(transform_str.c_str());
+    }
+    group(element, diagram, root, status);
 }
 
 }  // namespace prefigure

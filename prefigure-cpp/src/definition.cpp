@@ -1,4 +1,5 @@
 #include "prefigure/definition.hpp"
+#include "prefigure/diagram.hpp"
 #include "prefigure/user_namespace.hpp"
 
 #include <spdlog/spdlog.h>
@@ -8,9 +9,6 @@
 namespace prefigure {
 
 void definition(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status) {
-    (void)parent;
-    (void)status;
-
     // Get the definition text from the element's text content
     auto text_val = element.child_value();
     if (!text_val || std::string(text_val).empty()) {
@@ -34,12 +32,20 @@ void definition(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus
         substitution = false;
     }
 
-    // TODO: Get ExpressionContext from diagram and call define()
-    // For now this is a stub that will be connected when Diagram is implemented
-    // ctx->define(text, substitution);
-    (void)diagram;
-    (void)substitution;
-    (void)text;
+    try {
+        diagram.expr_ctx().define(text, substitution);
+    } catch (const std::exception& e) {
+        spdlog::error("Error in definition: {}", e.what());
+    }
+
+    // Handle id-suffix (this definition is part of a repeat)
+    auto id_suffix_attr = element.attribute("id-suffix");
+    if (id_suffix_attr) {
+        std::string suffix = "-" + std::string(id_suffix_attr.value());
+        diagram.push_id_suffix(suffix);
+        diagram.parse(element, parent, status);
+        diagram.pop_id_suffix();
+    }
 }
 
 void definition_derivative(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status) {
@@ -58,9 +64,11 @@ void definition_derivative(XmlNode element, Diagram& diagram, XmlNode parent, Ou
         return;
     }
 
-    // TODO: Get ExpressionContext from diagram and call register_derivative()
-    // ctx->register_derivative(func_attr.value(), name_attr.value());
-    (void)diagram;
+    try {
+        diagram.expr_ctx().register_derivative(func_attr.value(), name_attr.value());
+    } catch (const std::exception& e) {
+        spdlog::error("Error in derivative: {}", e.what());
+    }
 }
 
 }  // namespace prefigure

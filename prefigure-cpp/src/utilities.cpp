@@ -1,4 +1,5 @@
 #include "prefigure/utilities.hpp"
+#include "prefigure/diagram.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -95,10 +96,15 @@ void cliptobbox(XmlNode g_element, XmlNode element, Diagram& diagram) {
     auto clip_attr = element.attribute("cliptobbox");
     if (!clip_attr || std::string(clip_attr.value()) == "no") return;
 
-    // Will be fully implemented when Diagram is available
-    // diagram.get_clippath() provides the clip-path URL
-    (void)diagram;
-    (void)g_element;
+    std::string clippath_id = diagram.get_clippath();
+    if (!clippath_id.empty()) {
+        std::string clip_url = std::format("url(#{})", clippath_id);
+        if (g_element.attribute("clip-path")) {
+            g_element.attribute("clip-path").set_value(clip_url.c_str());
+        } else {
+            g_element.append_attribute("clip-path").set_value(clip_url.c_str());
+        }
+    }
 }
 
 std::string float2str(double x) {

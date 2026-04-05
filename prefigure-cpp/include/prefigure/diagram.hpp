@@ -5,9 +5,9 @@
 #include "user_namespace.hpp"
 
 #include <array>
-#include <map>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -31,6 +31,7 @@ public:
 
     CTM& ctm();
     BBox bbox();
+    std::pair<CTM, BBox> ctm_bbox();
     void push_ctm(std::pair<CTM, BBox> ctm_bbox);
     std::pair<CTM, BBox> pop_ctm();
 
@@ -39,6 +40,7 @@ public:
 
     void add_id(XmlNode element, const std::string& id = "");
     std::string find_id(XmlNode element, const std::string& id = "");
+    std::string append_id_suffix(XmlNode element);
     std::string prepend_id_prefix(const std::string& id);
 
     void push_clippath(XmlNode clippath);
@@ -61,6 +63,7 @@ public:
     void register_svg_element(XmlNode source, XmlNode svg, bool overwrite = true);
     void add_label(XmlNode element, XmlNode group);
     void register_label_dims(XmlNode element, std::pair<double, double> dims);
+    std::pair<double, double> get_label_dims(XmlNode element);
     void add_legend(/* Legend& */);
     void add_shape(XmlNode shape_node);
     XmlNode recall_shape(const std::string& id);
@@ -77,9 +80,16 @@ public:
     void initialize_annotations();
     void add_annotation(XmlNode annotation);
     void add_default_annotation(XmlNode annotation);
+    std::vector<XmlNode>& get_default_annotations();
+    XmlNode get_annotations_root();
     void push_to_annotation_branch(XmlNode annotation);
     void pop_from_annotation_branch();
     void add_annotation_to_branch(XmlNode annotation);
+    XmlNode get_annotation_branch(const std::string& id);
+
+    // ID suffix management
+    void push_id_suffix(const std::string& suffix);
+    void pop_id_suffix();
 
     // Data storage
     void register_source_data(XmlNode element, const std::string& key, const Value& value);
@@ -94,12 +104,22 @@ public:
     // Expression context
     ExpressionContext& expr_ctx();
 
+    // Caption
+    void set_caption(const std::string& text);
+    bool caption_suppressed() const;
+
 private:
+    void check_annotation_ref(XmlNode element);
+
+    // Expression context (owns the namespace for this diagram)
+    ExpressionContext expr_ctx_;
+
     // Document objects
-    XmlDoc svg_doc_;
-    XmlNode diagram_element_;
+    pugi::xml_document svg_doc_;        // owns the SVG tree
+    pugi::xml_document scratch_doc_;    // for standalone elements (annotations, etc.)
     XmlNode root_;
     XmlNode defs_;
+    XmlNode diagram_element_;           // the input XML element
 
     // Configuration
     std::string filename_;
@@ -109,38 +129,59 @@ private:
     XmlNode publication_;
     bool suppress_caption_;
     Environment environment_;
+    std::string caption_;
+    std::string external_;
+
+    // ID management
+    bool add_id_prefix_ = false;
+    std::string id_prefix_;
+    std::vector<std::string> id_suffix_ = {""};
+    std::unordered_map<std::string, int> ids_;
 
     // CTM stack
     std::vector<std::pair<CTM, BBox>> ctm_stack_;
 
-    // Clippath stack
-    std::vector<XmlNode> clippath_stack_;
+    // Clippath stack (stores clippath IDs as strings)
+    std::vector<std::string> clippaths_;
 
     // Scales stack
-    std::vector<std::array<std::string, 2>> scales_stack_;
+    std::vector<std::array<std::string, 2>> scale_stack_;
 
-    // ID management
-    std::map<std::string, XmlNode> id_map_;
-    std::string id_prefix_;
+    // Margins and layout
+    std::array<double, 4> margins_ = {0, 0, 0, 0};
+    double bottomline_ = 0;
+    double centerline_ = 0;
 
-    // Reusable elements (defs)
-    std::map<std::string, XmlNode> reusable_map_;
+    // Defaults from publication file
+    std::unordered_map<std::string, XmlNode> defaults_;
+
+    // Reusable elements
+    std::unordered_map<std::string, XmlNode> reusables_;
 
     // Shapes
-    std::map<std::string, XmlNode> shape_map_;
-
-    // Data storage
-    std::map<std::string, Value> data_map_;
-    std::map<std::string, std::map<std::string, Value>> source_data_map_;
-
-    // Network coordinates
-    std::map<std::string, Value> network_coords_;
-
-    // Labels
-    std::vector<std::pair<XmlNode, XmlNode>> labels_;
+    std::unordered_map<std::string, XmlNode> shape_dict_;
 
     // Annotations
-    std::vector<XmlNode> annotation_branch_;
+    XmlNode annotations_root_;
+    bool add_default_annotations_ = true;
+    bool author_annotations_present_ = false;
+    std::vector<XmlNode> default_annotations_;
+    std::vector<XmlNode> annotation_branch_stack_;
+    std::unordered_map<std::string, XmlNode> annotation_branches_;
+
+    // Element data storage (keyed by node hash_value)
+    std::unordered_map<size_t, std::unordered_map<std::string, Value>> source_data_;
+    std::unordered_map<size_t, Value> saved_data_;
+
+    // Label management
+    std::unordered_map<size_t, std::pair<XmlNode, CTM>> label_group_dict_;
+    std::unordered_map<size_t, std::pair<double, double>> label_dims_;
+
+    // Network coordinates
+    std::unordered_map<std::string, Value> network_coords_;
+
+    // Legends (stub for now)
+    // std::vector<Legend> legends_;
 };
 
 }  // namespace prefigure
