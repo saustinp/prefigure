@@ -89,10 +89,61 @@ Python-to-C++ Module Mapping
      - ``circle_element()``, ``arc()``, ``angle_marker()``
    * - ``label.py``
      - ``label.cpp``
-     - ``label()``, ``place_labels()``
-   * - (etc.)
-     - (etc.)
-     - (etc.)
+     - ``label_element()``, ``place_labels()``, ``evaluate_text()``
+   * - ``label_tools.py``
+     - ``label_tools.cpp``
+     - ``LocalMathLabels``, ``CairoTextMeasurements``, ``LocalLouisBrailleTranslator``
+   * - ``legend.py``
+     - ``legend.cpp``
+     - ``Legend`` class, ``place_legend()``
+   * - ``annotations.py``
+     - ``annotations.cpp``
+     - ``annotations()``, ``annotate()``, ``diagram_to_speech()``
+   * - ``path.py``
+     - ``path_element.cpp``
+     - ``path_element()``, 11 sub-commands, 5 decorations
+   * - ``vector.py``
+     - ``vector_element.cpp``
+     - ``vector()``, 8-quadrant label alignment
+   * - ``parametric_curve.py``
+     - ``parametric_curve.cpp``
+     - ``parametric_curve()``
+   * - ``tangent_line.py``
+     - ``tangent_line.cpp``
+     - ``tangent()``, numerical derivative
+   * - ``area.py``
+     - ``area.cpp``
+     - ``area_between_curves()``, ``area_under_curve()``
+   * - ``riemann_sum.py``
+     - ``riemann_sum.cpp``
+     - ``riemann_sum()``, 7 approximation rules
+   * - ``implicit.py``
+     - ``implicit.cpp``
+     - ``implicit_curve()``, QuadTree + Newton-Raphson
+   * - ``slope_field.py``
+     - ``slope_field.cpp``
+     - ``slope_field()``, ``vector_field()``
+   * - ``statistics.py``
+     - ``statistics.cpp``
+     - ``scatter()``, ``histogram()``
+   * - ``image.py``
+     - ``image.cpp``
+     - ``image()``, base64 + foreignObject
+   * - ``axes.py``
+     - ``axes.cpp``
+     - ``Axes`` class, ``find_label_positions()``, ``get_pi_text()``
+   * - ``grid_axes.py``
+     - ``grid_axes.cpp``
+     - ``grid()``, ``grid_axes()``, ``find_gridspacing()``
+   * - ``diffeqs.py``
+     - ``diffeqs.cpp``
+     - ``de_solve()`` (custom RK45), ``plot_de_solution()``
+   * - ``network.py``
+     - ``network.cpp``
+     - ``network()``, 7 layout algorithms
+   * - ``shape.py``
+     - ``shape.cpp``
+     - ``shape_define()``, ``shape()`` (GEOS boolean ops)
 
 Key Design Decisions
 --------------------
@@ -173,7 +224,7 @@ Library Dependency Map
       exprtk      ──>  Mathematical expression evaluation
 
     Optional:
-      Boost.Odeint    ──>  ODE solving (diffeqs.cpp)
+      Custom RK45     ──>  ODE solving (diffeqs.cpp, no Boost.Odeint dependency)
       Boost.Graph     ──>  Network graph layouts (network.cpp)
       GEOS            ──>  Boolean geometry operations (shape.cpp)
       libcairo        ──>  Text measurement for labels (label_tools.cpp)

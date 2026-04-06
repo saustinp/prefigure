@@ -89,7 +89,6 @@ public:
     /**
      * @brief Position all deferred labels (MathJax or tactile) that were queued during parse().
      *
-     * @note Currently a stub; full implementation requires the label module.
      */
     void place_labels();
 
@@ -320,8 +319,6 @@ public:
      * @param source    The original XML element.
      * @param svg       The generated SVG element.
      * @param overwrite If true (default), replace any existing mapping.
-     *
-     * @note Currently a stub.
      */
     void register_svg_element(XmlNode source, XmlNode svg, bool overwrite = true);
 

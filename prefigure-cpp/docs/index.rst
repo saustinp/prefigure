@@ -22,6 +22,10 @@ for batch processing of academic manuscripts and textbooks.
    guide/porting_guide
    guide/expression_eval
    guide/coordinate_transforms
+   guide/label_system
+   guide/network_layouts
+   guide/implicit_curves
+   guide/element_handlers
    guide/python_bindings
    guide/testing
 
@@ -39,3 +43,7 @@ for batch processing of academic manuscripts and textbooks.
    api/elements
    api/labels
    api/annotations
+   api/diffeqs
+   api/network
+   api/shapes
+   api/axes
