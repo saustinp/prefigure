@@ -86,7 +86,7 @@ jobs:
             CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
           # Skip tests inside cibuildwheel — they need MathJax/Node which isn't available
           # Testing happens in the test-cpp-backend job instead
-          CIBW_TEST_COMMAND: "python -c 'import _prefigure; print(\"C++ extension loaded OK\")'"
+          CIBW_TEST_COMMAND: "python -c 'from prefig import _prefigure; print(\"C++ extension loaded OK\")'"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -115,4 +115,4 @@ jobs:
           pip install pytest
 
       - name: Verify C++ backend loads
-        run: python -c "import _prefigure; print('C++ backend loaded successfully')"
+        run: python -c "from prefig import _prefigure; print('C++ backend loaded successfully')"

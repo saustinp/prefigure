@@ -23,7 +23,7 @@ def _get_backend():
         _USE_CPP = False
         return False
     try:
-        import _prefigure  # noqa: F401
+        from prefig import _prefigure  # noqa: F401
         _USE_CPP = True
         return True
     except ImportError:
@@ -96,7 +96,7 @@ def build(
     log.info(f"Building from PreFigure source {filename}")
 
     if _get_backend():
-        import _prefigure
+        from prefig import _prefigure
         fmt = _prefigure.OutputFormat.Tactile if format == "tactile" else _prefigure.OutputFormat.SVG
         env_map = {
             "pretext": _prefigure.Environment.Pretext,
@@ -119,7 +119,7 @@ def build(
 # an XML tree containing the SVG and annotation trees
 def build_from_string(format, input_string, environment="pyodide"):
     if _get_backend():
-        import _prefigure
+        from prefig import _prefigure
         return _prefigure.build_from_string(format, input_string, environment)
 
     # Pure Python fallback
