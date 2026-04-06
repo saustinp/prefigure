@@ -1,0 +1,117 @@
+name: Build wheels and test
+
+on:
+  push:
+    branches: [main, cpp-packaging]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # Job 1: C++ unit tests (Catch2) — no wheel needed
+  cpp-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgeos-dev libcairo2-dev liblouis-dev pkg-config
+
+      - name: Configure and build C++ tests
+        working-directory: prefigure-cpp
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DPREFIGURE_BUILD_PYTHON=OFF \
+            -DPREFIGURE_BUILD_TESTS=ON
+          cmake --build build --parallel $(nproc)
+
+      - name: Run Catch2 tests
+        working-directory: prefigure-cpp
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+  # Job 2: Python tests with pure-Python backend
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev pkg-config
+
+      - name: Install Python package (pure-Python)
+        run: |
+          pip install shapely lxml click networkx scipy numpy pycairo click-log pytest
+
+      - name: Run pytest (Python backend)
+        env:
+          PREFIGURE_USE_PYTHON: "1"
+          PYTHONPATH: .
+        run: pytest -vv tests/
+
+  # Job 3: Build manylinux wheels with C++ backend
+  build-wheels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: "cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64"
+          CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_34"
+          CIBW_BEFORE_ALL_LINUX: >
+            dnf install -y epel-release &&
+            dnf install -y geos-devel cairo-devel pkg-config autoconf automake libtool &&
+            curl -L https://github.com/liblouis/liblouis/releases/download/v3.31.0/liblouis-3.31.0.tar.gz | tar xz &&
+            cd liblouis-3.31.0 && ./configure --prefix=/usr/local --disable-static && make -j$(nproc) && make install &&
+            ldconfig
+          CIBW_ENVIRONMENT: >
+            CMAKE_BUILD_PARALLEL_LEVEL=$(nproc)
+          CIBW_TEST_REQUIRES: pytest
+          CIBW_TEST_COMMAND: >
+            pytest {project}/tests/ -x --timeout=120
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels
+          path: ./wheelhouse/*.whl
+
+  # Job 4: Verify C++ backend loads from built wheel
+  test-cpp-backend:
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels
+          path: wheelhouse
+
+      - name: Install wheel
+        run: |
+          pip install wheelhouse/prefig-*cp312*manylinux*.whl
+          pip install pytest
+
+      - name: Verify C++ backend loads
+        run: python -c "import _prefigure; print('C++ backend loaded successfully')"
+
+      - name: Run pytest with C++ backend
+        run: pytest -vv tests/

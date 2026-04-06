@@ -1,12 +1,8 @@
 name: deploy-nightly
 
-# Adapted from PreTeXt CLI
-
 on:
   schedule:
-    # * is a special character in YAML so you have to quote this string.
     - cron: "23 5 * * *"
-  # Allows you to run this workflow manually from the Actions tab.
   workflow_dispatch:
 
 jobs:
@@ -14,36 +10,27 @@ jobs:
     name: Deploy to pypi
     runs-on: ubuntu-latest
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it.
       - uses: actions/checkout@v4
 
-      # Sets up python3
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.12'
 
-      # Setup poetry
-      - name: Install poetry 1.8.3
-        run: |
-          python -m ensurepip
-          python -m pip install --upgrade pip
-          python -m pip install poetry==1.8.3
-
-      - name: Install dependencies
-        shell: bash
-        run: python -m poetry install
+      - name: Install build tools
+        run: pip install build twine click click-log lxml shapely networkx scipy numpy
 
       - name: Run prep_nightly script and publish if ready
         env:
-          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+          PYTHONPATH: .
         run: |
           echo "Updating version number"
-          output=$(poetry run python scripts/prep_nightly.py)
+          output=$(python scripts/prep_nightly.py)
           echo "Completed nightly prep"
           echo "Output: $output"
           if [[ $output == *"OK to deploy"* ]]; then
-            poetry build
-            poetry config pypi-token.pypi $PYPI_TOKEN
-            poetry publish
+            python -m build --sdist
+            twine upload dist/*
             echo "Published to pypi.org"
           fi

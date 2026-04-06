@@ -1,14 +1,58 @@
-[tool.poetry]
+[project]
 name = "prefig"
-version = "0.5.14"
+version = "0.6.0"
 description = "An authoring system for mathematical diagrams"
 readme = "README.md"
-homepage = "https://prefigure.org"
-repository = "https://github.com/davidaustinm/prefigure"
-authors = ["David Austin <david.austin.m@gmail.com>"]
 license = "GPL-3.0-or-later"
+requires-python = ">=3.10"
+authors = [
+    { name = "David Austin", email = "david.austin.m@gmail.com" },
+    { name = "Sam Austin", email = "sam.austin.p@gmail.com" },
+]
+dependencies = [
+    "shapely>=2.0.6",
+    "lxml>=6",
+    "click>=8.1.7",
+    "networkx>=3.0",
+    "scipy>=1.8; python_version<'3.13'",
+    "scipy>=1.14.1; python_version>='3.13'",
+    "numpy>=1.26; python_version<'3.13'",
+    "numpy>=2.1.0; python_version>='3.13'",
+    "click-log>=0.4.0",
+]
 
-include = ["resources"]
+[project.optional-dependencies]
+text = ["pycairo>=1.20"]
+dev = ["pytest>=8.3.4"]
+
+[project.scripts]
+prefig = "prefig.cli:main"
+
+[project.urls]
+Homepage = "https://prefigure.org"
+Repository = "https://github.com/saustinp/prefigure"
+
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+wheel.packages = ["prefig"]
+cmake.build-type = "Release"
+cmake.args = ["-DPREFIGURE_BUILD_TESTS=OFF"]
+install.components = ["python"]
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake.define]
+PREFIGURE_BUILD_PYTHON = "ON"
+PREFIGURE_BUILD_TESTS = "OFF"
+
+# Poetry compatibility — allows `poetry install`, `poetry add`, `poetry shell`
+[tool.poetry]
+name = "prefig"
+version = "0.6.0"
+description = "An authoring system for mathematical diagrams"
+authors = ["David Austin <david.austin.m@gmail.com>", "Sam Austin <sam.austin.p@gmail.com>"]
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -29,7 +73,3 @@ prefig = "prefig.cli:main"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.4"
-
-[build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"

@@ -6,6 +6,30 @@ from . import core
 import logging
 import lxml.etree as ET
 
+# Backend selection: C++ (fast) or Python (default fallback)
+_USE_CPP = None
+
+def _get_backend():
+    """Determine whether to use C++ or Python backend.
+
+    Checks PREFIGURE_USE_PYTHON env var first (set to "1" to force Python).
+    Otherwise tries to import the C++ extension module.  Falls back to
+    Python silently if the C++ module is unavailable.
+    """
+    global _USE_CPP
+    if _USE_CPP is not None:
+        return _USE_CPP
+    if os.environ.get("PREFIGURE_USE_PYTHON", "").lower() in ("1", "true", "yes"):
+        _USE_CPP = False
+        return False
+    try:
+        import _prefigure  # noqa: F401
+        _USE_CPP = True
+        return True
+    except ImportError:
+        _USE_CPP = False
+        return False
+
 # We're going to include some basic functions here so they can be
 # called from one of several environments, either the standalone CLI,
 # PreTeXt, or Pyodide
@@ -71,17 +95,34 @@ def build(
 
     log.info(f"Building from PreFigure source {filename}")
 
-    core.parse.parse(filename,
-                     format,
-                     publication,
-                     suppress_caption,
-                     environment)
+    if _get_backend():
+        import _prefigure
+        fmt = _prefigure.OutputFormat.Tactile if format == "tactile" else _prefigure.OutputFormat.SVG
+        env_map = {
+            "pretext": _prefigure.Environment.Pretext,
+            "pf_cli": _prefigure.Environment.PfCli,
+            "pyodide": _prefigure.Environment.Pyodide,
+        }
+        cpp_env = env_map.get(environment, _prefigure.Environment.Pretext)
+        pub_str = str(publication) if publication else ""
+        _prefigure.parse(str(filename), fmt, pub_str, suppress_caption, cpp_env)
+    else:
+        core.parse.parse(filename,
+                         format,
+                         publication,
+                         suppress_caption,
+                         environment)
     return filename
 
 
 # Build from an input string and return a string formed from
 # an XML tree containing the SVG and annotation trees
 def build_from_string(format, input_string, environment="pyodide"):
+    if _get_backend():
+        import _prefigure
+        return _prefigure.build_from_string(format, input_string, environment)
+
+    # Pure Python fallback
     tree = ET.fromstring(input_string)
     log.setLevel(logging.DEBUG)
     ns = {'pf': 'https://prefigure.org'}

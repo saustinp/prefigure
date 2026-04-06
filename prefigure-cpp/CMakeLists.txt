@@ -278,7 +278,9 @@ if(PREFIGURE_BUILD_PYTHON)
         bindings/py_types.cpp
     )
     target_link_libraries(_prefigure PRIVATE prefigure)
-    install(TARGETS _prefigure DESTINATION prefig)
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+        install(TARGETS _prefigure DESTINATION prefig)
+    endif()
 endif()
 
 # ---- Tests ----

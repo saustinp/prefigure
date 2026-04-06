@@ -29,14 +29,14 @@ namespace prefigure {
  * @see parse() for the higher-level entry point that finds `<diagram>` elements in a file.
  * @see Diagram for the object that manages the rendering pipeline.
  */
-void mk_diagram(XmlNode element,
-                OutputFormat format,
-                XmlNode publication,
-                const std::string& filename,
-                bool suppress_caption,
-                std::optional<int> diagram_number,
-                Environment environment,
-                bool return_string = false);
+std::string mk_diagram(XmlNode element,
+                       OutputFormat format,
+                       XmlNode publication,
+                       const std::string& filename,
+                       bool suppress_caption,
+                       std::optional<int> diagram_number,
+                       Environment environment,
+                       bool return_string = false);
 
 /**
  * @brief Parse a PreFigure XML file, locate all `<diagram>` elements, and render each one.
@@ -70,5 +70,25 @@ void parse(const std::string& filename,
  * @param handles A mutable set that accumulates seen handle strings across recursive calls.
  */
 void check_duplicate_handles(XmlNode element, std::set<std::string>& handles);
+
+/**
+ * @brief Build a diagram from an XML string and return the SVG (+ annotations) as a string.
+ *
+ * This is the C++ equivalent of Python's `engine.build_from_string()`.
+ * It parses the XML string, finds the first `<diagram>` element, strips
+ * namespace prefixes, checks for duplicate handles, and renders the
+ * diagram to an SVG string.
+ *
+ * @param format_str  Output format: "svg" or "tactile".
+ * @param xml_string  The complete XML source containing a `<diagram>` element.
+ * @param environment The host environment name (default: "pyodide").
+ * @return The rendered SVG as a string, or empty string on error.
+ *
+ * @see mk_diagram() for the rendering pipeline.
+ * @see parse() for the file-based entry point.
+ */
+std::string build_from_string(const std::string& format_str,
+                               const std::string& xml_string,
+                               const std::string& environment = "pyodide");
 
 }  // namespace prefigure

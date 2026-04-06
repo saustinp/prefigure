@@ -9,14 +9,14 @@
 
 namespace prefigure {
 
-void mk_diagram(XmlNode element,
-                OutputFormat format,
-                XmlNode publication,
-                const std::string& filename,
-                bool suppress_caption,
-                std::optional<int> diagram_number,
-                Environment environment,
-                bool return_string) {
+std::string mk_diagram(XmlNode element,
+                       OutputFormat format,
+                       XmlNode publication,
+                       const std::string& filename,
+                       bool suppress_caption,
+                       std::optional<int> diagram_number,
+                       Environment environment,
+                       bool return_string) {
 
     std::optional<std::string> output = std::nullopt;
     Diagram diag(element, filename, diagram_number,
@@ -29,7 +29,7 @@ void mk_diagram(XmlNode element,
     } catch (const std::exception& e) {
         spdlog::error("There was a problem initializing the PreFigure diagram");
         spdlog::error("Error: {}", e.what());
-        return;
+        return "";
     }
 
     spdlog::debug("Processing PreFigure elements");
@@ -38,7 +38,7 @@ void mk_diagram(XmlNode element,
     } catch (const std::exception& e) {
         spdlog::error("There was a problem parsing a PreFigure element");
         spdlog::error("Error: {}", e.what());
-        return;
+        return "";
     }
 
     spdlog::debug("Positioning labels");
@@ -47,23 +47,23 @@ void mk_diagram(XmlNode element,
     } catch (const std::exception& e) {
         spdlog::error("There was a problem placing the labels in the diagram");
         spdlog::error("Error: {}", e.what());
-        return;
+        return "";
     }
 
     spdlog::debug("Writing the diagram and any annotations");
     diag.annotate_source();
     try {
         if (return_string) {
-            // The string result would need to be returned; for now just generate
             auto [svg, ann] = diag.end_figure_to_string();
-            (void)svg; (void)ann;
+            return svg;
         } else {
             diag.end_figure();
+            return "";
         }
     } catch (const std::exception& e) {
         spdlog::error("There was a problem finishing the diagram");
         spdlog::error("Error: {}", e.what());
-        return;
+        return "";
     }
 }
 
@@ -204,6 +204,84 @@ void check_duplicate_handles(XmlNode element, std::set<std::string>& handles) {
 
         check_duplicate_handles(child, handles);
     }
+}
+
+std::string build_from_string(const std::string& format_str,
+                               const std::string& xml_string,
+                               const std::string& environment) {
+    // Parse format string
+    OutputFormat format = OutputFormat::SVG;
+    if (format_str == "tactile") {
+        format = OutputFormat::Tactile;
+    }
+
+    // Parse environment string
+    Environment env = Environment::Pyodide;
+    if (environment == "pretext") {
+        env = Environment::Pretext;
+    } else if (environment == "pf_cli") {
+        env = Environment::PfCli;
+    }
+
+    // Parse XML from string
+    pugi::xml_document doc;
+    auto result = doc.load_string(xml_string.c_str());
+    if (!result) {
+        spdlog::error("Unable to parse XML string");
+        return "";
+    }
+
+    // Helper lambdas (same as in parse())
+    auto strip_ns = [](pugi::xml_node node) {
+        std::string name = node.name();
+        auto colon = name.find(':');
+        if (colon != std::string::npos) {
+            node.set_name(name.substr(colon + 1).c_str());
+        }
+    };
+
+    auto local_name = [](pugi::xml_node node) -> std::string {
+        std::string name = node.name();
+        auto colon = name.find(':');
+        return (colon != std::string::npos) ? name.substr(colon + 1) : name;
+    };
+
+    std::function<void(pugi::xml_node)> strip_ns_recursive = [&](pugi::xml_node node) {
+        for (auto child = node.first_child(); child; child = child.next_sibling()) {
+            if (child.type() != pugi::node_element) continue;
+            strip_ns(child);
+            strip_ns_recursive(child);
+        }
+    };
+
+    // Find first <diagram> element
+    std::function<pugi::xml_node(pugi::xml_node)> find_diagram = [&](pugi::xml_node node) -> pugi::xml_node {
+        for (auto child = node.first_child(); child; child = child.next_sibling()) {
+            if (child.type() != pugi::node_element) continue;
+            if (local_name(child) == "diagram") return child;
+            auto found = find_diagram(child);
+            if (found) return found;
+        }
+        return pugi::xml_node();
+    };
+
+    auto diagram = find_diagram(doc);
+    if (!diagram) {
+        return "";
+    }
+
+    // Strip namespace prefixes
+    strip_ns(diagram);
+    strip_ns_recursive(diagram);
+
+    // Check for duplicate handles
+    std::set<std::string> handles;
+    check_duplicate_handles(diagram, handles);
+
+    // Build the diagram and return as string
+    XmlNode null_publication;
+    return mk_diagram(diagram, format, null_publication,
+                      "prefig", false, std::nullopt, env, true);
 }
 
 }  // namespace prefigure
