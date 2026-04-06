@@ -16,3 +16,6 @@ wasm
 .vite
 prefigure-cpp/build/
 profiling_results*.png
+build_deploy_convo.txt
+phase2_plan.md
+plan.md
