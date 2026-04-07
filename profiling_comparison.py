@@ -42,6 +42,14 @@ From the repository root, with the editable install built::
     # Save the chart to a specific path instead of /tmp/:
     .venv/bin/python profiling_comparison.py --runs 30 --output prof.png
 
+    # Pin the entire benchmark process to one CPU to lower variance.
+    # On Intel hybrid CPUs (12th gen+ Alder Lake / Raptor Lake / Meteor Lake)
+    # the OS scheduler migrates the process between Performance and
+    # Efficiency cores, which inflates the per-run stddev on slow diagrams
+    # by 5-10x.  CPU 3 is a safe default; AVOID CPU 0 because Linux
+    # routes IRQs there and they cause outliers on tiny diagrams (<2 ms):
+    .venv/bin/python profiling_comparison.py --runs 30 --pin-cpu 3
+
     # Skip a backend (useful when one isn't built):
     .venv/bin/python profiling_comparison.py --no-cpp     # Python only
     .venv/bin/python profiling_comparison.py --no-python  # C++ only
@@ -69,6 +77,7 @@ and reproducible benchmark numbers.
 from __future__ import annotations
 
 import argparse
+import os
 import statistics
 import sys
 import time
@@ -590,7 +599,40 @@ def main():
             "saves the plot to a file and returns immediately."
         ),
     )
+    parser.add_argument(
+        "--pin-cpu", type=int, default=None, metavar="N",
+        help=(
+            "Pin this process to CPU N for the duration of the benchmark "
+            "(Linux only).  Strongly recommended on Intel hybrid CPUs "
+            "(12th gen+) where the kernel scheduler migrates between "
+            "Performance and Efficiency cores.  Use `lscpu --extended` to "
+            "find a P-core (look for the highest MAXMHZ).  AVOID CPU 0: "
+            "Linux distributions conventionally route timer interrupts and "
+            "work queues to CPU 0, which causes outliers on diagrams "
+            "shorter than ~2 ms because the interrupt handlers steal "
+            "cycles directly from the pinned benchmark process.  CPU 3 is "
+            "typically a safe choice on Alder Lake / Raptor Lake / Meteor "
+            "Lake.  Equivalent to running the script under `taskset -c N`, "
+            "but built in so you don't have to remember it."
+        ),
+    )
     args = parser.parse_args()
+
+    # Pin to a single CPU as early as possible.  We do this before importing
+    # the C++ extension so that any internal thread pools the extension might
+    # spin up inherit the affinity mask.  os.sched_setaffinity is Linux-only;
+    # on macOS / Windows the call doesn't exist and we just warn and skip.
+    if args.pin_cpu is not None:
+        if not hasattr(os, "sched_setaffinity"):
+            print(f"WARNING: --pin-cpu is not supported on this platform "
+                  f"({sys.platform}); ignoring.")
+        else:
+            try:
+                os.sched_setaffinity(0, {args.pin_cpu})
+                print(f"[OK] Pinned process to CPU {args.pin_cpu} "
+                      f"(affinity={sorted(os.sched_getaffinity(0))})")
+            except OSError as exc:
+                sys.exit(f"ERROR: could not pin to CPU {args.pin_cpu}: {exc}")
 
     if args.list:
         print("Available example diagrams (in " + str(EXAMPLES_DIR) + "):")
