@@ -20,9 +20,36 @@ namespace prefigure {
 // in the ~16k-line exprtk.hpp.
 struct ExprtkState;
 
-// Forward declaration of the per-function compiled state holder.  Definition
-// is private to user_namespace.cpp.
+// Forward declarations of the per-function compiled state holders.
+// Definitions are private to user_namespace.cpp.
+struct CompiledScalar1State;
 struct CompiledScalar2State;
+
+/**
+ * @brief A raw-function-pointer view onto a 1-argument scalar user function.
+ *
+ * Mirror of CompiledFunction2 for the single-argument case.  Used by hot
+ * inner loops in graph.cpp / slope_field.cpp / parametric_curve.cpp /
+ * tangent_line.cpp / area.cpp where a user-defined `f(x) = ...` is called
+ * many times per element.
+ *
+ * Obtain one with ExpressionContext::get_compiled_scalar1(name).  Returns
+ * std::nullopt unless `name` is a bare identifier referring to a previously
+ * defined 1-arg scalar user function (i.e., one that took the
+ * `is_scalar_only` fast path at definition time).
+ */
+struct CompiledFunction1 {
+    using InvokeFn = double(*)(const void*, double);
+
+    const void* impl_ = nullptr;
+    InvokeFn invoke_ = nullptr;
+
+    bool valid() const noexcept { return invoke_ != nullptr; }
+
+    inline double operator()(double x) const {
+        return invoke_(impl_, x);
+    }
+};
 
 /**
  * @brief A raw-function-pointer view onto a 2-argument scalar user function.
@@ -233,6 +260,19 @@ public:
     void finish_breaks();
 
     /**
+     * @brief Look up a 1-arg scalar user function by name and return a raw
+     *        function-pointer view of it for hot inner loops.
+     *
+     * Mirror of get_compiled_scalar2() for the single-argument case.
+     * Used by graph.cpp, parametric_curve.cpp, tangent_line.cpp, and
+     * the scalar branch of slope_field.cpp.  Returns std::nullopt if the
+     * argument isn't a bare identifier referring to a registered scalar
+     * 1-arg user function.
+     */
+    std::optional<CompiledFunction1>
+    get_compiled_scalar1(const std::string& name_or_expr) const;
+
+    /**
      * @brief Look up a 2-arg scalar user function by name and return a raw
      *        function-pointer view of it for hot inner loops.
      *
@@ -277,12 +317,15 @@ private:
     // need to include exprtk.hpp from this header.
     std::unique_ptr<ExprtkState> exprtk_state_;
 
-    // Per-function compiled state for the scalar 2-arg fast path used by
-    // CompiledFunction2.  Each entry holds the AST shared pointer plus a
-    // back-reference to this context, so the dispatcher can find them via
-    // a single pointer-cast.  Stable addresses are required (the
-    // CompiledFunction2 holds a raw pointer into the value), so we use
-    // unique_ptr<...> as the value type rather than the bare struct.
+    // Per-function compiled state for the scalar 1-arg and 2-arg fast paths
+    // used by CompiledFunction1 / CompiledFunction2.  Each entry holds the
+    // AST shared pointer plus a back-reference to this context, so the
+    // dispatcher can find them via a single pointer-cast.  Stable addresses
+    // are required (the CompiledFunctionN holds a raw pointer into the
+    // value), so we use unique_ptr<...> as the value type rather than the
+    // bare struct.
+    std::unordered_map<std::string, std::unique_ptr<CompiledScalar1State>>
+        compiled_scalar1_;
     std::unordered_map<std::string, std::unique_ptr<CompiledScalar2State>>
         compiled_scalar2_;
 

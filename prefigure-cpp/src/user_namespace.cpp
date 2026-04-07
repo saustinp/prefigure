@@ -1264,6 +1264,14 @@ private:
 // Defined at namespace scope (not inside the anonymous namespace) because
 // the header forward-declares it.
 
+struct CompiledScalar1State {
+    std::shared_ptr<ExprNode> ast;
+    ExpressionContext* ctx;
+
+    CompiledScalar1State(std::shared_ptr<ExprNode> a, ExpressionContext* c)
+        : ast(std::move(a)), ctx(c) {}
+};
+
 struct CompiledScalar2State {
     std::shared_ptr<ExprNode> ast;
     ExpressionContext* ctx;
@@ -1271,6 +1279,15 @@ struct CompiledScalar2State {
     CompiledScalar2State(std::shared_ptr<ExprNode> a, ExpressionContext* c)
         : ast(std::move(a)), ctx(c) {}
 };
+
+// 1-arg dispatcher.  Mirror of dispatch_compiled_scalar2 for the single-
+// argument case.  Used by graph.cpp / slope_field.cpp / etc. via the
+// CompiledFunction1 raw-fn-pointer wrapper.
+static double dispatch_compiled_scalar1(const void* impl, double x) {
+    const auto* state = static_cast<const CompiledScalar1State*>(impl);
+    double bindings[1] = { x };
+    return evaluate_double(*state->ast, bindings, *state->ctx);
+}
 
 // The dispatcher is a free function with C-compatible signature so its
 // address can be stored in the CompiledFunction2's invoke_ field.  No
@@ -1513,6 +1530,16 @@ Value ExpressionContext::eval(const std::string& raw_expr,
                         functions_.insert(func_name);
                         variables_.insert(func_name);
                         namespace_[func_name] = Value(func);
+
+                        // Also publish a CompiledFunction1 view of the same
+                        // AST under the same name so element handlers like
+                        // graph.cpp / parametric_curve.cpp / slope_field.cpp
+                        // (scalar branch) can opt into the raw-function-
+                        // pointer dispatch and skip the std::function shim
+                        // entirely on their hot inner loops.
+                        compiled_scalar1_[func_name] =
+                            std::make_unique<CompiledScalar1State>(compiled_body, ctx);
+
                         return Value(func);
                     }
 
@@ -2053,18 +2080,15 @@ void ExpressionContext::finish_breaks() {
     breaks_ = nullptr;
 }
 
-std::optional<CompiledFunction2>
-ExpressionContext::get_compiled_scalar2(const std::string& name_or_expr) const {
-    // Trim leading/trailing whitespace.  Anything more elaborate (parens,
-    // operators, function calls of functions) means the caller wants to
-    // evaluate an expression, not look up a single named function, and we
-    // return nullopt so the caller falls back to the regular MathFunction2.
-    size_t first = name_or_expr.find_first_not_of(" \t\n\r");
+// Helper that turns a possibly-whitespaced expression string into a bare
+// identifier name, or returns std::nullopt if the input is anything more
+// elaborate (parens, operators, etc.).  Used by get_compiled_scalar1 and
+// get_compiled_scalar2.
+static std::optional<std::string> as_bare_identifier(const std::string& s) {
+    size_t first = s.find_first_not_of(" \t\n\r");
     if (first == std::string::npos) return std::nullopt;
-    size_t last = name_or_expr.find_last_not_of(" \t\n\r");
-    std::string name = name_or_expr.substr(first, last - first + 1);
-
-    // The name must be a single bare identifier.
+    size_t last = s.find_last_not_of(" \t\n\r");
+    std::string name = s.substr(first, last - first + 1);
     if (name.empty()) return std::nullopt;
     if (!std::isalpha(static_cast<unsigned char>(name[0])) && name[0] != '_') {
         return std::nullopt;
@@ -2074,8 +2098,33 @@ ExpressionContext::get_compiled_scalar2(const std::string& name_or_expr) const {
             return std::nullopt;
         }
     }
+    return name;
+}
 
-    auto it = compiled_scalar2_.find(name);
+std::optional<CompiledFunction1>
+ExpressionContext::get_compiled_scalar1(const std::string& name_or_expr) const {
+    auto name = as_bare_identifier(name_or_expr);
+    if (!name) return std::nullopt;
+
+    auto it = compiled_scalar1_.find(*name);
+    if (it == compiled_scalar1_.end()) return std::nullopt;
+
+    CompiledFunction1 cf;
+    cf.impl_ = it->second.get();
+    cf.invoke_ = &dispatch_compiled_scalar1;
+    return cf;
+}
+
+std::optional<CompiledFunction2>
+ExpressionContext::get_compiled_scalar2(const std::string& name_or_expr) const {
+    // Trim leading/trailing whitespace.  Anything more elaborate (parens,
+    // operators, function calls of functions) means the caller wants to
+    // evaluate an expression, not look up a single named function, and we
+    // return nullopt so the caller falls back to the regular MathFunction2.
+    auto name = as_bare_identifier(name_or_expr);
+    if (!name) return std::nullopt;
+
+    auto it = compiled_scalar2_.find(*name);
     if (it == compiled_scalar2_.end()) return std::nullopt;
 
     CompiledFunction2 cf;

@@ -51,18 +51,33 @@ struct QuadTree {
 
     QuadTree(std::array<Point2d, 4> c, int d) : corners(c), depth(d) {}
 
-    std::vector<QuadTree> subdivide() const {
-        Point2d bottom = midpoint(Eigen::VectorXd(corners[0]), Eigen::VectorXd(corners[1]));
-        Point2d left = midpoint(Eigen::VectorXd(corners[0]), Eigen::VectorXd(corners[3]));
-        Point2d right = midpoint(Eigen::VectorXd(corners[1]), Eigen::VectorXd(corners[2]));
-        Point2d top = midpoint(Eigen::VectorXd(corners[2]), Eigen::VectorXd(corners[3]));
-        Point2d mid = midpoint(Eigen::VectorXd(bottom), Eigen::VectorXd(top));
+    // Inline scalar midpoint of two stack-allocated 2-vectors.  Replaces the
+    // pre-Phase-2 round trip of `midpoint(Eigen::VectorXd(corners[i]),
+    // Eigen::VectorXd(corners[j]))`, which heap-allocated three dynamically-
+    // sized Eigen vectors per call.  For implicit's quadtree at depth ~12
+    // with 5 level curves, that pattern was responsible for ~10^6 malloc/
+    // free pairs across the diagram and dominated `implicit_curve` self-time
+    // in the post-Phase-1.5 perf trace (26.68%).
+    static inline Point2d mid(const Point2d& a, const Point2d& b) noexcept {
+        return Point2d{(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5};
+    }
+
+    // Returns the four child quadrants by value (NRVO'd into the caller).
+    // Using std::array<QuadTree, 4> instead of std::vector eliminates one
+    // additional heap allocation per subdivide call -- the result aggregate
+    // lives entirely on the stack.
+    std::array<QuadTree, 4> subdivide() const {
+        const Point2d bottom = mid(corners[0], corners[1]);
+        const Point2d right_ = mid(corners[1], corners[2]);
+        const Point2d top    = mid(corners[2], corners[3]);
+        const Point2d left   = mid(corners[3], corners[0]);
+        const Point2d centre = mid(bottom, top);
 
         return {
-            QuadTree({corners[0], Point2d(bottom), Point2d(mid), Point2d(left)}, depth - 1),
-            QuadTree({Point2d(bottom), corners[1], Point2d(right), Point2d(mid)}, depth - 1),
-            QuadTree({Point2d(left), Point2d(mid), Point2d(top), corners[3]}, depth - 1),
-            QuadTree({Point2d(mid), Point2d(right), corners[2], Point2d(top)}, depth - 1)
+            QuadTree({corners[0], bottom,     centre,     left      }, depth - 1),
+            QuadTree({bottom,     corners[1], right_,     centre    }, depth - 1),
+            QuadTree({centre,     right_,     corners[2], top       }, depth - 1),
+            QuadTree({left,       centre,     top,        corners[3]}, depth - 1)
         };
     }
 
@@ -160,40 +175,36 @@ void implicit_curve(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
 
     BBox bbox = diagram.bbox();
 
-    // Get function.  We resolve two views in parallel:
-    //   1. The MathFunction2 / std::function path (always available; works
-    //      for vector-valued functions and inline expressions).
-    //   2. A CompiledFunction2 raw-function-pointer view, available only
-    //      when the attribute is a bare identifier referring to a registered
-    //      scalar 2-arg user function.  This is the path the implicit
-    //      example takes (`function="f"` where `f(x,y) = y^2 - x^3 + x`).
-    //
-    // The hot LevelSet::value loop prefers the compiled view when present
-    // and falls back to the std::function path otherwise.  Both views are
-    // resolved here once at element-handler time, so the inner loop never
-    // touches the namespace map or pays for any lookup.
+    // Get function.  We try the cheap raw-function-pointer view first;
+    // if it succeeds we have everything we need for the hot LevelSet::value
+    // loop and we skip the expensive std::function-returning eval entirely.
+    // Only when the attribute is something other than a bare identifier --
+    // an inline expression like `function="g(x)+1"` -- do we fall back to
+    // the regular ExpressionContext::eval path.
     MathFunction2 f;
     std::optional<CompiledFunction2> f_compiled;
-    try {
-        const char* func_attr = element.attribute("function").value();
-        auto val = diagram.expr_ctx().eval(func_attr);
-        if (val.is_function2()) {
-            f = val.as_function2();
-        } else if (val.is_function()) {
-            spdlog::error("Error in <implicit-curve>: function must take two arguments");
-            return;
-        } else {
-            spdlog::error("Error in <implicit-curve> retrieving function={}", func_attr);
+    const char* func_attr = element.attribute("function").value();
+
+    f_compiled = diagram.expr_ctx().get_compiled_scalar2(func_attr);
+    if (!f_compiled) {
+        // Slow path: evaluate the attribute as a general expression and
+        // store the resulting std::function for the LevelSet fallback.
+        try {
+            auto val = diagram.expr_ctx().eval(func_attr);
+            if (val.is_function2()) {
+                f = val.as_function2();
+            } else if (val.is_function()) {
+                spdlog::error("Error in <implicit-curve>: function must take two arguments");
+                return;
+            } else {
+                spdlog::error("Error in <implicit-curve> retrieving function={}", func_attr);
+                return;
+            }
+        } catch (...) {
+            spdlog::error("Error in <implicit-curve> retrieving function={}",
+                          get_attr(element, "function", ""));
             return;
         }
-        // Try to get the raw-function-pointer view as well.  Returns
-        // nullopt if the attribute isn't a bare identifier or if the
-        // function isn't a registered scalar 2-arg user function.
-        f_compiled = diagram.expr_ctx().get_compiled_scalar2(func_attr);
-    } catch (...) {
-        spdlog::error("Error in <implicit-curve> retrieving function={}",
-                      get_attr(element, "function", ""));
-        return;
     }
 
     double k;
@@ -229,10 +240,12 @@ void implicit_curve(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
         Point2d(bbox[0], bbox[3])
     }, max_depth);
 
-    // Initial uniform subdivision
+    // Initial uniform subdivision.  Each iteration grows `tree` by a factor
+    // of 4, so pre-reserving avoids ~initial_depth rounds of reallocation.
     std::vector<QuadTree> tree = {root};
     for (int i = 0; i < initial_depth; ++i) {
         std::vector<QuadTree> newtree;
+        newtree.reserve(tree.size() * 4);
         for (const auto& node : tree) {
             auto children = node.subdivide();
             newtree.insert(newtree.end(), children.begin(), children.end());
@@ -240,12 +253,19 @@ void implicit_curve(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
         tree = std::move(newtree);
     }
 
-    // Adaptive refinement
+    // Adaptive refinement.  We process the work list as a LIFO stack rather
+    // than a FIFO queue: each iteration takes the back element with O(1)
+    // pop_back instead of front+erase(begin) which was O(N) per iteration
+    // and dominated `implicit_curve` self-time in the post-Phase-1.5 perf
+    // trace (~5*10^7 element-moves over the run).  The order in which leaf
+    // segments are discovered does not affect the final SVG path because we
+    // collect them all into `all_segments` and emit them as independent M/L
+    // pairs.
     std::vector<QuadTree::Segment> all_segments;
     std::vector<QuadTree> work = std::move(tree);
     while (!work.empty()) {
-        QuadTree node = work.front();
-        work.erase(work.begin());
+        QuadTree node = std::move(work.back());
+        work.pop_back();
 
         if (node.depth == 0) {
             auto segs = node.segments(levelset);

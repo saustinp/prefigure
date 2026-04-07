@@ -2,11 +2,13 @@
 #include "prefigure/diagram.hpp"
 #include "prefigure/group.hpp"
 #include "prefigure/math_utilities.hpp"
+#include "prefigure/user_namespace.hpp"
 #include "prefigure/utilities.hpp"
 
 #include <spdlog/spdlog.h>
 
 #include <cmath>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -68,15 +70,15 @@ void slope_field(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatu
     MathFunction f1;
     bool is_system = get_attr(element, "system", "no") == "yes";
 
+    const char* func_attr = element.attribute("function").value();
     try {
-        auto val = diagram.expr_ctx().eval(element.attribute("function").value());
+        auto val = diagram.expr_ctx().eval(func_attr);
         if (val.is_function2()) {
             f2 = val.as_function2();
         } else if (val.is_function()) {
             f1 = val.as_function();
         } else {
-            spdlog::error("Error retrieving slope-field function={}",
-                          element.attribute("function").value());
+            spdlog::error("Error retrieving slope-field function={}", func_attr);
             return;
         }
     } catch (...) {
@@ -84,6 +86,14 @@ void slope_field(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatu
                       get_attr(element, "function", ""));
         return;
     }
+
+    // Try to also resolve raw-function-pointer views.  Whichever one matches
+    // (or neither, if the attribute is an inline expression rather than a
+    // bare identifier) is used by the inner grid loop in preference to the
+    // std::function path.  This is the same opt-in pattern implicit.cpp
+    // uses for CompiledFunction2.
+    auto f1_compiled = diagram.expr_ctx().get_compiled_scalar1(func_attr);
+    auto f2_compiled = diagram.expr_ctx().get_compiled_scalar2(func_attr);
 
     BBox bbox = diagram.bbox();
 
@@ -182,20 +192,34 @@ void slope_field(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatu
                     add_line = false;
                 }
             } else {
-                // Scalar slope field: f(x, y) returns slope dy/dx
+                // Scalar slope field: f(x, y) returns slope dy/dx.
+                // Prefer the raw-fn-pointer compiled views (f2_compiled or
+                // f1_compiled) when available -- they skip the std::function
+                // shim and the Value variant copy/destroy on every grid cell.
                 double slope;
                 bool zero_div = false;
                 try {
-                    Value result;
-                    if (f2) {
-                        result = f2(Value(x), Value(y));
-                    } else {
-                        // Try as single-arg function with vector argument
+                    if (f2_compiled) {
+                        slope = (*f2_compiled)(x, y);
+                    } else if (f2) {
+                        slope = f2(Value(x), Value(y)).to_double();
+                    } else if (f1_compiled) {
+                        // CompiledFunction1 takes a single double, but the
+                        // 1-arg slope-field convention is f(vector)->scalar.
+                        // The compiled view only fires for scalar 1-arg
+                        // user functions, which f1 isn't here -- so this
+                        // branch is reachable only if a future codegen
+                        // extends CompiledFunction1 to accept vector args.
+                        // For now leave the slow path active.
                         Eigen::VectorXd args(2);
                         args << x, y;
-                        result = f1(Value(args));
+                        slope = f1(Value(args)).to_double();
+                    } else {
+                        // Slow vector-arg path
+                        Eigen::VectorXd args(2);
+                        args << x, y;
+                        slope = f1(Value(args)).to_double();
                     }
-                    slope = result.to_double();
                     if (std::isinf(slope) || std::isnan(slope)) {
                         zero_div = true;
                     }

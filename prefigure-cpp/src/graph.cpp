@@ -2,6 +2,7 @@
 #include "prefigure/arrow.hpp"
 #include "prefigure/diagram.hpp"
 #include "prefigure/math_utilities.hpp"
+#include "prefigure/user_namespace.hpp"
 #include "prefigure/utilities.hpp"
 
 #include <spdlog/spdlog.h>
@@ -9,18 +10,35 @@
 #include <cmath>
 #include <format>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace prefigure {
 
+// A tiny dual-mode wrapper that lets the hot graph-sample inner loops call
+// `sf(x)` and get a `double` directly, picking the raw-function-pointer
+// CompiledFunction1 path when it's available and falling back to the
+// std::function MathFunction path otherwise.  Both paths return NaN/Inf on
+// bad inputs (sqrt(-1), 1/0, etc.) without throwing, so the surrounding
+// singularity-detection logic in cartesian_path/polar_path stays unchanged.
+struct ScalarCallable {
+    const MathFunction* slow = nullptr;
+    std::optional<CompiledFunction1> fast;
+
+    inline double operator()(double x) const {
+        if (fast) return (*fast)(x);
+        return (*slow)(Value(x)).to_double();
+    }
+};
+
 // Forward declarations
 static void finish_outline_graph(XmlNode element, Diagram& diagram, XmlNode parent);
 static std::string cartesian_path(XmlNode element, Diagram& diagram,
-                                  const MathFunction& f,
+                                  const ScalarCallable& f,
                                   const std::array<double, 2>& domain, int N);
 static std::string polar_path(XmlNode element, Diagram& diagram,
-                              const MathFunction& f,
+                              const ScalarCallable& f,
                               const std::array<double, 2>& domain, int N);
 
 // Append " M x.x y.y" / " L x.x y.y" / " Z" / etc. to an SVG path string in
@@ -79,10 +97,19 @@ void graph(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
         domain[0] = new_domain[0];
     }
 
-    // Get function
+    // Get function.  We resolve two views in parallel just like
+    // implicit.cpp::implicit_curve does for CompiledFunction2:
+    //   1. The MathFunction / std::function path (always available).
+    //   2. A CompiledFunction1 raw-function-pointer view, available only
+    //      when the attribute is a bare identifier referring to a registered
+    //      scalar 1-arg user function.
+    //
+    // The ScalarCallable wrapper picks the fast path when present.  All
+    // example diagrams that use <graph function="f"/> will hit it.
     MathFunction f;
+    const char* func_attr = element.attribute("function").value();
     try {
-        auto val = diagram.expr_ctx().eval(element.attribute("function").value());
+        auto val = diagram.expr_ctx().eval(func_attr);
         if (val.is_function()) {
             f = val.as_function();
         } else {
@@ -93,14 +120,17 @@ void graph(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
         spdlog::error("Error retrieving function in graph: {}", e.what());
         return;
     }
+    ScalarCallable sf;
+    sf.slow = &f;
+    sf.fast = diagram.expr_ctx().get_compiled_scalar1(func_attr);
 
     int N = std::stoi(get_attr(element, "N", "100"));
 
     std::string d;
     if (polar) {
-        d = polar_path(element, diagram, f, domain, N);
+        d = polar_path(element, diagram, sf, domain, N);
     } else {
-        d = cartesian_path(element, diagram, f, domain, N);
+        d = cartesian_path(element, diagram, sf, domain, N);
     }
 
     // Set attributes
@@ -163,7 +193,7 @@ static void finish_outline_graph(XmlNode element, Diagram& diagram, XmlNode pare
 }
 
 static std::string cartesian_path(XmlNode element, Diagram& diagram,
-                                   const MathFunction& f,
+                                   const ScalarCallable& f,
                                    const std::array<double, 2>& domain, int N) {
     auto scales = diagram.get_scales();
     BBox bbox = diagram.bbox();
@@ -207,12 +237,14 @@ static std::string cartesian_path(XmlNode element, Diagram& diagram,
         double x = x_positions[i];
         double dx = (i > 0) ? (x - x_positions[i - 1]) : 0.0;
 
-        // Try to evaluate f(x)
+        // Try to evaluate f(x).  ScalarCallable returns NaN/Inf on bad
+        // inputs without throwing for the fast path; the slow path may also
+        // throw on user-defined-function errors, which we still treat as
+        // "this point is not visible."
         double y;
         bool eval_ok = true;
         try {
-            Value result = f(Value(x));
-            y = result.to_double();
+            y = f(x);
             if (std::isnan(y) || std::isinf(y)) eval_ok = false;
         } catch (...) {
             eval_ok = false;
@@ -227,8 +259,7 @@ static std::string cartesian_path(XmlNode element, Diagram& diagram,
                 for (int j = 0; j < 8; ++j) {
                     ddx /= 2.0;
                     try {
-                        Value rv = f(Value(xx));
-                        double yy = rv.to_double();
+                        double yy = f(xx);
                         if (std::isnan(yy) || std::isinf(yy)) {
                             xx -= ddx;
                             continue;
@@ -240,7 +271,7 @@ static std::string cartesian_path(XmlNode element, Diagram& diagram,
                     }
                 }
                 try {
-                    double fy = f(Value(last_good_x)).to_double();
+                    double fy = f(last_good_x);
                     Point2d p = diagram.transform(Point2d(last_good_x, fy));
                     append_cmd(d, 'L', p);
                 } catch (...) {}
@@ -260,7 +291,7 @@ static std::string cartesian_path(XmlNode element, Diagram& diagram,
                 for (int j = 0; j < 8; ++j) {
                     ddx /= 2.0;
                     try {
-                        double yy = f(Value(xx)).to_double();
+                        double yy = f(xx);
                         if (yy > upper || yy < lower || std::isnan(yy)) {
                             xx -= ddx;
                         } else {
@@ -272,7 +303,7 @@ static std::string cartesian_path(XmlNode element, Diagram& diagram,
                     }
                 }
                 try {
-                    double fy = f(Value(last_good_x)).to_double();
+                    double fy = f(last_good_x);
                     Point2d p = diagram.transform(Point2d(last_good_x, fy));
                     append_cmd(d, 'L', p);
                 } catch (...) {}
@@ -292,7 +323,7 @@ static std::string cartesian_path(XmlNode element, Diagram& diagram,
             for (int j = 0; j < 8; ++j) {
                 ddx /= 2.0;
                 try {
-                    double yy = f(Value(xx)).to_double();
+                    double yy = f(xx);
                     if (yy > upper || yy < lower || std::isnan(yy) || std::isinf(yy)) {
                         xx += ddx;
                         continue;
@@ -306,7 +337,7 @@ static std::string cartesian_path(XmlNode element, Diagram& diagram,
 
             if (last_good_x < x) {
                 try {
-                    double fy = f(Value(last_good_x)).to_double();
+                    double fy = f(last_good_x);
                     Point2d p = diagram.transform(Point2d(last_good_x, fy));
                     append_cmd(d, 'M', p);
                     next_cmd = 'L';
@@ -325,7 +356,7 @@ static std::string cartesian_path(XmlNode element, Diagram& diagram,
 }
 
 static std::string polar_path(XmlNode element, Diagram& diagram,
-                               const MathFunction& f,
+                               const ScalarCallable& f,
                                const std::array<double, 2>& domain, int N) {
     BBox bbox = diagram.bbox();
     Eigen::VectorXd bbox_min(2), bbox_max(2);
@@ -351,7 +382,7 @@ static std::string polar_path(XmlNode element, Diagram& diagram,
     for (int i = 0; i <= N; ++i) {
         double r;
         try {
-            r = f(Value(t)).to_double();
+            r = f(t);
         } catch (...) {
             next_cmd = 'M';
             t += dt;
