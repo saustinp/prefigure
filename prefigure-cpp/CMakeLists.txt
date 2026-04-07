@@ -52,15 +52,36 @@ if(NOT Eigen3_FOUND)
 endif()
 
 # spdlog
-find_package(spdlog QUIET)
+#
+# When PREFIGURE_BUILD_PYTHON is ON the prefigure static library gets linked
+# into _prefigure.so, which requires every transitive dep to be PIC. System
+# spdlog installs (e.g. /usr/local/lib/libspdlog.a from a manual `make install`)
+# are often built without -fPIC and will fail to link with:
+#   "relocation R_X86_64_TPOFF32 against ... can not be used when making a
+#    shared object; recompile with -fPIC"
+# We can't change the compile flags of an already-installed static lib, so in
+# the Python-binding configuration we skip find_package entirely and build
+# spdlog from source via FetchContent. The top-level CMAKE_POSITION_INDEPENDENT_CODE
+# setting propagates into the FetchContent subproject, and we also pass
+# SPDLOG_BUILD_PIC=ON as belt-and-suspenders. For pure C++ library/test
+# builds we still allow the system spdlog so users don't pay the FetchContent
+# compile cost on every reconfigure.
+if(NOT PREFIGURE_BUILD_PYTHON)
+    find_package(spdlog QUIET)
+endif()
 if(NOT spdlog_FOUND)
-    message(STATUS "spdlog not found, fetching via FetchContent...")
+    if(PREFIGURE_BUILD_PYTHON)
+        message(STATUS "Fetching spdlog via FetchContent (PIC required for Python module)...")
+    else()
+        message(STATUS "spdlog not found, fetching via FetchContent...")
+    endif()
     FetchContent_Declare(
         spdlog
         GIT_REPOSITORY https://github.com/gabime/spdlog.git
         GIT_TAG v1.14.1
         GIT_SHALLOW TRUE
     )
+    set(SPDLOG_BUILD_PIC ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(spdlog)
 endif()
 

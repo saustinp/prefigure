@@ -1,5 +1,6 @@
 #include "prefigure/utilities.hpp"
 #include "prefigure/diagram.hpp"
+#include "prefigure/user_namespace.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -36,6 +37,32 @@ std::string get_attr(XmlNode element, const std::string& attr, const std::string
     auto attrib = element.attribute(attr.c_str());
     if (!attrib) return default_val;
     return attrib.value();
+}
+
+std::string get_attr(XmlNode element, ExpressionContext& ctx,
+                     const std::string& attr, const std::string& default_val) {
+    std::string raw;
+    auto attrib = element.attribute(attr.c_str());
+    raw = attrib ? std::string(attrib.value()) : default_val;
+    if (raw.empty()) return raw;
+    try {
+        Value v = ctx.eval(raw);
+        if (v.is_string()) return v.as_string();
+        if (v.is_double()) return std::format("{}", v.as_double());
+        if (v.is_vector()) {
+            const auto& vec = v.as_vector();
+            std::string out;
+            for (Eigen::Index i = 0; i < vec.size(); ++i) {
+                if (i > 0) out += ",";
+                out += std::format("{:.4f}", vec[i]);
+            }
+            return out;
+        }
+        // Non-stringifiable result -- return raw
+        return raw;
+    } catch (...) {
+        return raw;
+    }
 }
 
 void set_attr(XmlNode element, const std::string& attr, const std::string& default_val) {

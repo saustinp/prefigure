@@ -416,8 +416,10 @@ void label_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSta
         }
     }
 
-    // Set alignment
-    std::string align = get_attr(element, "alignment", "c");
+    // Set alignment.  We pass through the expression context so that values
+    // like alignment="alignments[k]" inside a <repeat> get evaluated against
+    // the user namespace (matching Python's util.get_attr semantics).
+    std::string align = get_attr(element, diagram.expr_ctx(), "alignment", "c");
     if (align.size() > 0 && (align[0] == '2' || align == "e")) {
         align = "east";
     }
@@ -464,7 +466,7 @@ static void position_svg_label(XmlNode element, Diagram& diagram, const CTM& ctm
         return;
     }
 
-    std::string alignment = get_attr(element, "alignment", "center");
+    std::string alignment = get_attr(element, diagram.expr_ctx(), "alignment", "center");
     auto disp_it = s_alignment_displacement.find(alignment);
     if (disp_it == s_alignment_displacement.end()) {
         spdlog::error("Unknown alignment in label: {}", alignment);
@@ -790,7 +792,7 @@ static void position_braille_label(XmlNode element, Diagram& diagram, const CTM&
         return;
     }
 
-    std::string alignment = get_attr(element, "alignment", "center");
+    std::string alignment = get_attr(element, diagram.expr_ctx(), "alignment", "center");
     auto disp_it = s_braille_displacement.find(alignment);
     if (disp_it == s_braille_displacement.end()) {
         spdlog::error("Unknown alignment in label: {}", alignment);

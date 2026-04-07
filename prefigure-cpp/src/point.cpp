@@ -280,8 +280,13 @@ static XmlNode add_label_to_point(XmlNode element, Diagram& diagram, XmlNode par
         auto id_attr = element.attribute("id");
         if (id_attr) diagram.add_id(group, id_attr.value());
 
-        // Create label element
-        XmlNode el = group.append_child("label");
+        // Create the label element in scratch space, NOT in the SVG output
+        // tree.  In Python this is `el = copy.deepcopy(element); el.tag = 'label'`
+        // — a detached element that is only used as a data carrier for the
+        // label-placement pipeline.  If we appended it to `group` (which is in
+        // the live SVG tree) the source <label> and its <m> children would be
+        // serialized verbatim into the output SVG, leaking the source XML.
+        XmlNode el = diagram.get_scratch().append_child("label");
         // Copy children
         for (auto child = element.first_child(); child; child = child.next_sibling()) {
             el.append_copy(child);

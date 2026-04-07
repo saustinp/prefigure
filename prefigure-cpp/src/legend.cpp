@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include <cmath>
+#include <memory>
 #include <string>
 
 namespace prefigure {
@@ -28,8 +29,8 @@ Legend::Legend(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus 
     diagram.add_id(group_, element.attribute("id").as_string());
     diagram.register_svg_element(element, group_);
 
-    // Register this legend for later placement
-    diagram.add_legend(this);
+    // (Registration with the diagram now happens at the call site in
+    //  legend_element() so the diagram can take ownership via unique_ptr.)
 
     // Parse anchor
     std::string anchor_str = get_attr(element, "anchor", "(bbox[2],bbox[3])");
@@ -257,8 +258,17 @@ void Legend::place_legend(Diagram& diagram) {
         auto dims = diagram.get_label_dims(entry.label);
         if (dims.first == 0 && dims.second == 0) continue;
 
-        // Retrieve the actual label group from diagram's label_group_dict
-        auto [label_group, label_el_node, label_ctm] = diagram.get_label_group(entry.label);
+        // Retrieve the actual label group from diagram's label_group_dict.
+        // The tuple is stored by Diagram::add_label as
+        //   make_tuple(element, group, ctm)
+        // so the destructure order MUST be (source_element, rendering_group,
+        // ctm).  A previous version had the first two swapped, which caused
+        // the legend to set a transform attribute on the source <label>
+        // element (in scratch) and then deep-copy that source element — with
+        // its <m> child still wrapped in <label> — into the SVG output tree.
+        // The result was a) the source XML leaking into the output and
+        // b) the actual rendered text never appearing inside the legend.
+        auto [src_label_el, label_group, label_ctm] = diagram.get_label_group(entry.label);
         if (label_group) {
             std::string label_tform = translatestr(label_x, y);
             label_group.append_attribute("transform").set_value(label_tform.c_str());
@@ -391,8 +401,10 @@ void Legend::place_tactile_legend(Diagram& diagram) {
         double lx = gap * std::round(label_x / gap);
         double ly = gap * std::round(y / gap);
 
-        // Retrieve the actual label group from diagram's label_group_dict
-        auto [label_group, label_el_node, label_ctm] = diagram.get_label_group(entry.label);
+        // Retrieve the actual label group from diagram's label_group_dict.
+        // See the matching comment in place_legend() above for why the
+        // destructure order matters: (source_element, rendering_group, ctm).
+        auto [src_label_el, label_group, label_ctm] = diagram.get_label_group(entry.label);
         if (label_group) {
             std::string label_tform = translatestr(lx, ly);
             label_group.append_attribute("transform").set_value(label_tform.c_str());
@@ -430,10 +442,10 @@ void legend_element(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
         return;
     }
 
-    // The Legend constructor registers itself with the diagram
-    // It will be placed later via place_legend()
-    // We allocate on the heap; diagram takes ownership via add_legend
-    new Legend(element, diagram, parent, status);
+    // Construct the Legend and hand ownership to the diagram.  The diagram
+    // will call legend->place_legend() later, after all label dimensions
+    // have been measured during place_labels().
+    diagram.add_legend(std::make_unique<Legend>(element, diagram, parent, status));
 }
 
 }  // namespace prefigure

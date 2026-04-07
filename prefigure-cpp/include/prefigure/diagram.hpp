@@ -5,6 +5,7 @@
 #include "user_namespace.hpp"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -13,6 +14,9 @@
 #include <vector>
 
 namespace prefigure {
+
+class Legend;  // forward declaration; full definition in legend.hpp
+
 
 /**
  * @brief Central orchestrator for building a single SVG diagram from XML input.
@@ -55,6 +59,10 @@ public:
             std::optional<int> diagram_number, OutputFormat format,
             std::optional<std::string> output, XmlNode publication,
             bool suppress_caption, Environment environment);
+
+    /// Destructor — defined in diagram.cpp where Legend is a complete type
+    /// (the std::unique_ptr<Legend> in legends_ requires Legend's destructor).
+    ~Diagram();
 
     // -- Figure lifecycle ---------------------------------------------------
 
@@ -349,9 +357,14 @@ public:
 
     /**
      * @brief Register a legend for deferred placement.
-     * @param legend Pointer to the Legend object (diagram does NOT own it).
+     *
+     * The diagram takes ownership of the Legend object.  All registered
+     * legends are placed (in registration order) at the end of place_labels(),
+     * after all label dimensions have been computed.
+     *
+     * @param legend Owning pointer to the Legend object.
      */
-    void add_legend(void* legend);
+    void add_legend(std::unique_ptr<Legend> legend);
 
     /**
      * @brief Retrieve the label group and CTM for a given source element.
@@ -672,8 +685,8 @@ private:
     // Network coordinates
     std::unordered_map<std::string, Value> network_coords_;
 
-    // Legends
-    std::vector<void*> legends_;
+    // Legends — owned by the diagram, placed during place_labels()
+    std::vector<std::unique_ptr<Legend>> legends_;
 
     // Source element to SVG element mapping
     std::unordered_map<size_t, XmlNode> source_to_svg_map_;

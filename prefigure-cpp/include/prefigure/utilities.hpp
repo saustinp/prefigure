@@ -42,6 +42,27 @@ void add_attr(XmlNode element, const std::unordered_map<std::string, std::string
 std::string get_attr(XmlNode element, const std::string& attr, const std::string& default_val);
 
 /**
+ * @brief Read an XML attribute and evaluate it through the expression context.
+ *
+ * Mirrors Python's `util.get_attr()` semantics:
+ *  1. Read the raw attribute value (or default)
+ *  2. Try to evaluate it through @p ctx
+ *  3. If evaluation succeeds, stringify the result (vectors are joined with commas)
+ *  4. If evaluation fails (unknown name, syntax error), return the raw string
+ *
+ * Used for attributes that may reference user-defined names — for example
+ * `alignment="alignments[k]"` inside a `<repeat>` loop.
+ *
+ * @param element     The XML node to query.
+ * @param ctx         The expression context to evaluate against.
+ * @param attr        The attribute name.
+ * @param default_val Value to return if the attribute does not exist.
+ * @return The (possibly evaluated) string form of the attribute.
+ */
+std::string get_attr(XmlNode element, ExpressionContext& ctx,
+                     const std::string& attr, const std::string& default_val);
+
+/**
  * @brief Ensure an XML attribute exists, setting it to a default if absent.
  *
  * If the attribute already exists, its value is preserved (and could be

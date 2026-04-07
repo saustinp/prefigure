@@ -1,32 +1,49 @@
 #!/usr/bin/env python3
 """
-PreFigure: Python vs C++ Performance Comparison
+PreFigure: Python vs C++ end-to-end performance comparison.
 
-This driver script benchmarks the Python and C++ implementations of the
-PreFigure library side by side, running identical test cases through both
-backends and plotting the results.
+For each of the 8 example XML diagrams, this script runs the full build
+pipeline 30 times against both backends, computes per-diagram averages,
+and renders a side-by-side bar chart of the results.
 
-Usage:
-    python profiling_comparison.py [--runs N] [--output FILE]
+The two backends are dispatched directly (no auto-selection):
 
-The C++ backend must be built first:
-    cd prefigure-cpp && ./build.sh --release
+    Python:  prefig.core.parse.parse(filename, "svg", None, False, "pf_cli")
+    C++:     _prefigure.parse(filename, _prefigure.OutputFormat.SVG, "",
+                              False, _prefigure.Environment.PfCli)
 
-Then ensure the _prefigure shared library is importable:
-    export PYTHONPATH=prefigure-cpp/build:$PYTHONPATH
+This bypasses ``prefig.engine.build()`` so the Python timing isn't
+contaminated by the engine's automatic backend autodetection (which
+silently switches to C++ whenever the extension is importable).
+
+USAGE
+-----
+From the repository root, with the editable install built:
+
+    .venv/bin/python profiling_comparison.py
+    .venv/bin/python profiling_comparison.py --runs 30 --output prof.png
+    .venv/bin/python profiling_comparison.py --no-cpp     # Python only
+    .venv/bin/python profiling_comparison.py --warmup 2   # discard first N
+
+REQUIREMENTS
+------------
+* The Python ``prefig`` package importable (``pip install -e .``).
+* The C++ extension module importable as ``prefig._prefigure``.
+  Build it with ``pip install -e .`` from the repo root.
+* matplotlib + numpy (already pulled in by ``pip install -e .[dev]``).
 """
 
+from __future__ import annotations
+
 import argparse
-import importlib
-import math
-import os
 import statistics
 import sys
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
-import matplotlib.pyplot as plt
 import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 
 matplotlib.rcParams.update({"font.size": 10})
@@ -38,9 +55,11 @@ matplotlib.rcParams.update({"font.size": 10})
 
 PROJECT_ROOT = Path(__file__).parent
 EXAMPLES_DIR = PROJECT_ROOT / "prefig" / "resources" / "examples"
-CPP_BUILD_DIR = PROJECT_ROOT / "prefigure-cpp" / "build"
 
-# Example XML files to benchmark for full diagram builds
+# The 8 integration examples that ship with the library.  These are the same
+# files exercised by ``verify_tests.sh`` and the C++ Catch2 ``test_golden``
+# regression suite, so timings here are directly comparable with the rest of
+# the test infrastructure.
 EXAMPLE_FILES = [
     "tangent.xml",
     "derivatives.xml",
@@ -52,399 +71,328 @@ EXAMPLE_FILES = [
     "roots_of_unity.xml",
 ]
 
-DEFAULT_RUNS = 5
+DEFAULT_RUNS = 30
+DEFAULT_WARMUP = 1
 
 
 # ============================================================================
-# Helpers
+# Imports — both backends are loaded explicitly
 # ============================================================================
 
-def time_fn(fn, *args, runs=5, **kwargs):
-    """Time a function over multiple runs, return list of durations in ms."""
-    times = []
+def import_python_backend():
+    """Return the Python ``core.parse.parse`` callable, or None on failure.
+
+    We deliberately import ``prefig.core.parse`` directly instead of routing
+    through ``prefig.engine.build()`` because the engine auto-selects the C++
+    backend whenever the extension module is importable.  Calling the core
+    module directly guarantees we're timing the pure-Python pipeline.
+    """
+    try:
+        from prefig.core import parse as core_parse
+        return core_parse.parse
+    except ImportError as exc:
+        print(f"[!!] Failed to import prefig.core.parse: {exc}")
+        return None
+
+
+def import_cpp_backend():
+    """Return the C++ ``_prefigure`` module, or None if it isn't built.
+
+    The editable install drops the compiled extension at
+    ``<venv>/site-packages/prefig/_prefigure.<tag>.so`` (or directly into
+    ``prefig/`` for an in-source editable layout).  Either way it's
+    accessible as ``prefig._prefigure``.  The old import path
+    (``import _prefigure`` from ``prefigure-cpp/build``) is no longer used.
+    """
+    try:
+        from prefig import _prefigure
+        return _prefigure
+    except ImportError as exc:
+        print(f"[--] C++ backend not available: {exc}")
+        print("     Build with:  .venv/bin/pip install -e .")
+        return None
+
+
+# ============================================================================
+# Timing helper
+# ============================================================================
+
+def time_fn(fn: Callable[[], None], *, runs: int, warmup: int) -> list[float]:
+    """Execute ``fn`` ``warmup + runs`` times and return the last ``runs``
+    durations in milliseconds.
+
+    A small warm-up phase discards the first few timings so JIT/I/O caches
+    (PyCairo font cache, MathJax Node startup, filesystem readahead, etc.)
+    are primed before we start collecting samples.
+    """
+    for _ in range(warmup):
+        fn()
+    times: list[float] = []
     for _ in range(runs):
         start = time.perf_counter()
-        fn(*args, **kwargs)
-        elapsed = (time.perf_counter() - start) * 1000.0  # ms
-        times.append(elapsed)
+        fn()
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        times.append(elapsed_ms)
     return times
 
 
-def try_import_cpp():
-    """Try to import the C++ pybind11 module."""
-    # Add build directory to path if needed
-    build_lib = CPP_BUILD_DIR
-    if build_lib.exists() and str(build_lib) not in sys.path:
-        sys.path.insert(0, str(build_lib))
+# ============================================================================
+# Per-backend builders
+# ============================================================================
 
-    try:
-        import _prefigure as cpp_mod
-        return cpp_mod
-    except ImportError:
-        return None
+def make_python_runner(py_parse: Callable, xml_path: str) -> Callable[[], None]:
+    """Return a zero-arg closure that runs one full Python build of ``xml_path``.
+
+    Calls ``core.parse.parse`` with the same argument tuple that
+    ``prefig.engine.build`` would assemble for ``--ignore-publication``.
+    """
+    def run():
+        py_parse(
+            xml_path,
+            "svg",       # format
+            None,        # publication file (skip discovery)
+            False,       # suppress_caption
+            "pf_cli",    # environment
+        )
+    return run
 
 
-def try_import_python():
-    """Import the Python prefigure library."""
-    try:
-        from prefig.core import user_namespace as un
-        from prefig.core import calculus
-        from prefig.core import math_utilities as mu
-        from prefig.core import CTM
-        from prefig import engine
-        return {
-            "user_namespace": un,
-            "calculus": calculus,
-            "math_utilities": mu,
-            "CTM": CTM,
-            "engine": engine,
-        }
-    except ImportError as e:
-        print(f"Warning: Could not import Python prefigure: {e}")
-        return None
+def make_cpp_runner(cpp_mod, xml_path: str) -> Callable[[], None]:
+    """Return a zero-arg closure that runs one full C++ build of ``xml_path``."""
+    fmt = cpp_mod.OutputFormat.SVG
+    env = cpp_mod.Environment.PfCli
+
+    def run():
+        cpp_mod.parse(
+            xml_path,    # filename
+            fmt,         # format
+            "",          # pub_file (empty = none)
+            False,       # suppress_caption
+            env,         # environment
+        )
+    return run
 
 
 # ============================================================================
-# Benchmark definitions
-#
-# Each benchmark is a dict with:
-#   name:     Display name
-#   python:   callable(runs) -> list of times in ms
-#   cpp:      callable(runs, cpp_mod) -> list of times in ms
+# Benchmark driver
 # ============================================================================
 
-def make_benchmarks(py_mods, cpp_mod):
-    """Create benchmark suite based on available modules."""
-    benchmarks = []
+def run_benchmarks(py_parse, cpp_mod, *, runs: int, warmup: int):
+    """Run all 8 integration tests against both backends.
 
-    # ------------------------------------------------------------------
-    # 1. Numerical derivative via Richardson extrapolation
-    # ------------------------------------------------------------------
-    if py_mods:
-        calc = py_mods["calculus"]
+    Returns a list of result dicts, one per example, with keys:
+        name, py_times, py_mean, py_std, cpp_times, cpp_mean, cpp_std
+    Missing backends produce None entries (not zeros) so the plotter can
+    distinguish a missing measurement from a real zero.
+    """
+    results = []
+    available = [f for f in EXAMPLE_FILES if (EXAMPLES_DIR / f).exists()]
+    if not available:
+        raise RuntimeError(f"No example files found under {EXAMPLES_DIR}")
 
-        def py_derivative(runs):
-            def work():
-                for _ in range(1000):
-                    calc.derivative(math.sin, 1.0)
-                    calc.derivative(math.exp, 2.0)
-                    calc.derivative(lambda x: x**3 + 2*x, 3.0)
-            return time_fn(work, runs=runs)
+    width = max(len(name) for name in available)
 
-        benchmarks.append({
-            "name": "Numerical Derivative\n(1000 Richardson extrapolations)",
-            "python": py_derivative,
-            "cpp": None,
+    for idx, fname in enumerate(available, start=1):
+        xml_path = str(EXAMPLES_DIR / fname)
+        label = fname.replace(".xml", "")
+
+        py_times: Optional[list[float]] = None
+        cpp_times: Optional[list[float]] = None
+
+        print(f"[{idx}/{len(available)}] {fname:<{width}} ", end="", flush=True)
+
+        if py_parse is not None:
+            try:
+                runner = make_python_runner(py_parse, xml_path)
+                py_times = time_fn(runner, runs=runs, warmup=warmup)
+            except Exception as exc:
+                print(f"\n     [!] Python backend failed: {exc}")
+                py_times = None
+
+        if cpp_mod is not None:
+            try:
+                runner = make_cpp_runner(cpp_mod, xml_path)
+                cpp_times = time_fn(runner, runs=runs, warmup=warmup)
+            except Exception as exc:
+                print(f"\n     [!] C++ backend failed: {exc}")
+                cpp_times = None
+
+        py_mean = statistics.mean(py_times) if py_times else None
+        py_std = statistics.stdev(py_times) if py_times and len(py_times) > 1 else 0.0
+        cpp_mean = statistics.mean(cpp_times) if cpp_times else None
+        cpp_std = statistics.stdev(cpp_times) if cpp_times and len(cpp_times) > 1 else 0.0
+
+        # Single-line summary
+        parts = []
+        if py_mean is not None:
+            parts.append(f"Py={py_mean:7.1f}ms (±{py_std:5.1f})")
+        if cpp_mean is not None:
+            parts.append(f"C++={cpp_mean:7.1f}ms (±{cpp_std:5.1f})")
+        if py_mean and cpp_mean and cpp_mean > 0:
+            parts.append(f"speedup {py_mean / cpp_mean:5.2f}x")
+        print("  ".join(parts))
+
+        results.append({
+            "name": label,
+            "py_times": py_times,
+            "py_mean": py_mean,
+            "py_std": py_std,
+            "cpp_times": cpp_times,
+            "cpp_mean": cpp_mean,
+            "cpp_std": cpp_std,
         })
 
-    # ------------------------------------------------------------------
-    # 2. Expression evaluation (define + evaluate functions)
-    # ------------------------------------------------------------------
-    if py_mods:
-        un = py_mods["user_namespace"]
-
-        def py_expr_eval(runs):
-            def work():
-                importlib.reload(un)
-                for _ in range(500):
-                    un.valid_eval("3 + 4 * 2")
-                    un.valid_eval("sin(pi/4)")
-                    un.define("f(x) = x^2 + 3*x + 1")
-                    un.valid_eval("f(5)")
-                    un.valid_eval("(1, 2, 3)")
-            return time_fn(work, runs=runs)
-
-        benchmarks.append({
-            "name": "Expression Evaluation\n(500 parse/eval cycles)",
-            "python": py_expr_eval,
-            "cpp": None,
-        })
-
-    # ------------------------------------------------------------------
-    # 3. CTM coordinate transforms
-    # ------------------------------------------------------------------
-    if py_mods:
-        ctm_mod = py_mods["CTM"]
-
-        def py_ctm_transforms(runs):
-            def work():
-                for _ in range(2000):
-                    ctm = ctm_mod.CTM()
-                    ctm.translate(10, 20)
-                    ctm.scale(2, 3)
-                    ctm.rotate(45)
-                    ctm.transform(np.array([5.0, 7.0]))
-                    ctm.inverse_transform(np.array([30.0, 81.0]))
-            return time_fn(work, runs=runs)
-
-        benchmarks.append({
-            "name": "CTM Transforms\n(2000 transform chains)",
-            "python": py_ctm_transforms,
-            "cpp": None,
-        })
-
-    # ------------------------------------------------------------------
-    # 4. Vector math operations
-    # ------------------------------------------------------------------
-    if py_mods:
-        mu = py_mods["math_utilities"]
-
-        def py_vector_math(runs):
-            def work():
-                u = np.array([3.0, 4.0])
-                v = np.array([1.0, 2.0])
-                for _ in range(5000):
-                    mu.dot(u, v)
-                    mu.length(u)
-                    mu.normalize(u)
-                    mu.midpoint(u, v)
-                    mu.distance(u, v)
-                    mu.angle(u)
-                    mu.rotate(u, 0.5)
-            return time_fn(work, runs=runs)
-
-        benchmarks.append({
-            "name": "Vector Math\n(5000 operation batches)",
-            "python": py_vector_math,
-            "cpp": None,
-        })
-
-    # ------------------------------------------------------------------
-    # 5. Bezier curve evaluation
-    # ------------------------------------------------------------------
-    if py_mods:
-        mu = py_mods["math_utilities"]
-
-        def py_bezier(runs):
-            controls = [np.array([0.0, 0.0]), np.array([1.0, 2.0]),
-                        np.array([3.0, 1.0]), np.array([4.0, 0.0])]
-            def work():
-                for _ in range(5000):
-                    for t in [0.0, 0.25, 0.5, 0.75, 1.0]:
-                        mu.evaluate_bezier(controls, t)
-            return time_fn(work, runs=runs)
-
-        benchmarks.append({
-            "name": "Bezier Evaluation\n(25000 cubic evaluations)",
-            "python": py_bezier,
-            "cpp": None,
-        })
-
-    # ------------------------------------------------------------------
-    # 6. Root finding / intersection
-    # ------------------------------------------------------------------
-    if py_mods:
-        mu = py_mods["math_utilities"]
-
-        def py_intersect(runs):
-            mu.set_diagram(type("FakeDiagram", (), {
-                "bbox": lambda self: [0, 0, 10, 10]
-            })())
-            def work():
-                for _ in range(200):
-                    f = lambda x: x**2 - 4
-                    mu.intersect(f, seed=1.0, interval=(0, 10))
-            return time_fn(work, runs=runs)
-
-        benchmarks.append({
-            "name": "Root Finding\n(200 bisection searches)",
-            "python": py_intersect,
-            "cpp": None,
-        })
-
-    # ------------------------------------------------------------------
-    # 7. Full diagram build (if examples exist)
-    # ------------------------------------------------------------------
-    if py_mods and EXAMPLES_DIR.exists():
-        engine = py_mods["engine"]
-        available_examples = [
-            f for f in EXAMPLE_FILES
-            if (EXAMPLES_DIR / f).exists()
-        ]
-
-        for example_file in available_examples:
-            example_path = str(EXAMPLES_DIR / example_file)
-            example_name = example_file.replace(".xml", "")
-
-            def make_py_build(path):
-                def py_build(runs):
-                    def work():
-                        engine.build(
-                            "svg",
-                            path,
-                            ignore_publication=True,
-                            environment="pf_cli",
-                        )
-                    return time_fn(work, runs=runs)
-                return py_build
-
-            benchmarks.append({
-                "name": f"Full Build: {example_name}",
-                "python": make_py_build(example_path),
-                "cpp": None,
-            })
-
-    # ------------------------------------------------------------------
-    # Wire up C++ benchmarks where C++ module is available
-    # ------------------------------------------------------------------
-    if cpp_mod is not None:
-        # C++ module exposes: derivative, CTM operations, expression eval, etc.
-        # via the pybind11 bindings
-
-        for bench in benchmarks:
-            name = bench["name"]
-
-            if "Derivative" in name and hasattr(cpp_mod, "derivative"):
-                def cpp_derivative(runs, mod=cpp_mod):
-                    def work():
-                        for _ in range(1000):
-                            mod.derivative(math.sin, 1.0)
-                            mod.derivative(math.exp, 2.0)
-                            mod.derivative(lambda x: x**3 + 2*x, 3.0)
-                    return time_fn(work, runs=runs)
-                bench["cpp"] = cpp_derivative
-
-            elif "Expression" in name and hasattr(cpp_mod, "ExpressionContext"):
-                def cpp_expr_eval(runs, mod=cpp_mod):
-                    def work():
-                        ctx = mod.ExpressionContext()
-                        for _ in range(500):
-                            ctx.eval("3 + 4 * 2")
-                            ctx.eval("sin(pi/4)")
-                            ctx.define("f(x) = x^2 + 3*x + 1")
-                            ctx.eval("f(5)")
-                            ctx.eval("(1, 2, 3)")
-                    return time_fn(work, runs=runs)
-                bench["cpp"] = cpp_expr_eval
-
-            elif "CTM" in name and hasattr(cpp_mod, "CTM"):
-                def cpp_ctm(runs, mod=cpp_mod):
-                    def work():
-                        for _ in range(2000):
-                            ctm = mod.CTM()
-                            ctm.translate(10, 20)
-                            ctm.scale(2, 3)
-                            ctm.rotate(45)
-                            ctm.transform((5.0, 7.0))
-                            ctm.inverse_transform((30.0, 81.0))
-                    return time_fn(work, runs=runs)
-                bench["cpp"] = cpp_ctm
-
-            elif "Full Build" in name and hasattr(cpp_mod, "parse"):
-                example_name = name.split(": ")[1]
-                example_path = str(EXAMPLES_DIR / f"{example_name}.xml")
-
-                def make_cpp_build(path, mod=cpp_mod):
-                    def cpp_build(runs):
-                        def work():
-                            mod.parse(
-                                path, "",
-                                None,
-                                mod.OutputFormat.SVG,
-                                None,
-                                mod.Environment.PfCli,
-                            )
-                        return time_fn(work, runs=runs)
-                    return cpp_build
-
-                bench["cpp"] = make_cpp_build(example_path)
-
-    return benchmarks
+    return results
 
 
 # ============================================================================
 # Plotting
 # ============================================================================
 
-def plot_results(results, output_file=None):
-    """
-    Plot benchmark results as a grid of bar charts.
+def plot_results(results: list[dict], runs: int, output_file: Optional[str]) -> None:
+    """Render a single grouped bar chart with one (Py, C++) pair per example.
 
-    results: list of dicts with keys:
-        name, python_mean, python_std, cpp_mean, cpp_std
+    The Python and C++ averages are placed side by side for each diagram, with
+    error bars showing one standard deviation.  Bars are annotated with the
+    average runtime, and a per-bar speedup factor is shown above each pair
+    when both backends were measured.
     """
-    n = len(results)
-    if n == 0:
-        print("No benchmark results to plot.")
+    if not results:
+        print("No results to plot.")
         return
 
-    # Determine grid layout
-    ncols = min(3, n)
-    nrows = math.ceil(n / ncols)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 4.5 * nrows))
+    names = [r["name"] for r in results]
+    py_means = [r["py_mean"] or 0 for r in results]
+    py_stds = [r["py_std"] or 0 for r in results]
+    cpp_means = [r["cpp_mean"] or 0 for r in results]
+    cpp_stds = [r["cpp_std"] or 0 for r in results]
 
-    if n == 1:
-        axes = np.array([axes])
-    axes = np.atleast_2d(axes)
+    have_py = any(r["py_mean"] is not None for r in results)
+    have_cpp = any(r["cpp_mean"] is not None for r in results)
 
-    bar_width = 0.35
-    colors_py = "#4C72B0"
-    colors_cpp = "#DD8452"
+    x = np.arange(len(names))
+    bar_width = 0.38
 
-    for idx, result in enumerate(results):
-        row, col = divmod(idx, ncols)
-        ax = axes[row][col]
+    fig, ax = plt.subplots(figsize=(max(11, 1.4 * len(names) + 4), 7))
 
-        labels = []
-        means = []
-        stds = []
-        colors = []
+    PY_COLOR = "#4C72B0"
+    CPP_COLOR = "#DD8452"
 
-        if result["python_mean"] is not None:
-            labels.append("Python")
-            means.append(result["python_mean"])
-            stds.append(result["python_std"])
-            colors.append(colors_py)
+    py_bars = None
+    cpp_bars = None
 
-        if result["cpp_mean"] is not None:
-            labels.append("C++")
-            means.append(result["cpp_mean"])
-            stds.append(result["cpp_std"])
-            colors.append(colors_cpp)
+    if have_py:
+        py_bars = ax.bar(
+            x - bar_width / 2 if have_cpp else x,
+            py_means,
+            bar_width if have_cpp else bar_width * 1.6,
+            yerr=py_stds,
+            color=PY_COLOR,
+            edgecolor="black",
+            linewidth=0.5,
+            capsize=4,
+            label="Python",
+        )
 
-        x = np.arange(len(labels))
-        bars = ax.bar(x, means, bar_width * 2, yerr=stds,
-                      color=colors, capsize=5, edgecolor="black", linewidth=0.5)
+    if have_cpp:
+        cpp_bars = ax.bar(
+            x + bar_width / 2 if have_py else x,
+            cpp_means,
+            bar_width if have_py else bar_width * 1.6,
+            yerr=cpp_stds,
+            color=CPP_COLOR,
+            edgecolor="black",
+            linewidth=0.5,
+            capsize=4,
+            label="C++",
+        )
 
-        ax.set_xticks(x)
-        ax.set_xticklabels(labels, fontweight="bold")
-        ax.set_ylabel("Time (ms)")
-        ax.set_title(result["name"], fontsize=10)
-
-        # Add value labels on bars
+    # Per-bar value labels
+    def annotate(bars, means, stds):
         for bar, mean, std in zip(bars, means, stds):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + std + 0.5,
-                    f"{mean:.2f} ms",
-                    ha="center", va="bottom", fontsize=8)
+            if mean <= 0:
+                continue
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + std + max(py_means + cpp_means) * 0.015,
+                f"{mean:.0f} ms",
+                ha="center", va="bottom", fontsize=8,
+            )
 
-        # Add speedup annotation if both bars present
-        if result["python_mean"] is not None and result["cpp_mean"] is not None:
-            if result["cpp_mean"] > 0:
-                speedup = result["python_mean"] / result["cpp_mean"]
-                ax.text(0.95, 0.95, f"{speedup:.1f}x",
-                        transform=ax.transAxes, ha="right", va="top",
-                        fontsize=14, fontweight="bold",
-                        color="green" if speedup > 1 else "red",
-                        bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                                  edgecolor="gray", alpha=0.8))
+    if py_bars is not None:
+        annotate(py_bars, py_means, py_stds)
+    if cpp_bars is not None:
+        annotate(cpp_bars, cpp_means, cpp_stds)
 
-        ax.grid(axis="y", alpha=0.3)
-        ax.set_axisbelow(True)
+    # Speedup annotations above each pair
+    if have_py and have_cpp:
+        max_h = max(
+            (py_means[i] + py_stds[i]) for i in range(len(names))
+        ) if py_means else 0
+        max_h = max(max_h, max(
+            (cpp_means[i] + cpp_stds[i]) for i in range(len(names))
+        ) if cpp_means else 0)
+        for i, r in enumerate(results):
+            if r["py_mean"] and r["cpp_mean"] and r["cpp_mean"] > 0:
+                speedup = r["py_mean"] / r["cpp_mean"]
+                color = "green" if speedup > 1 else "red"
+                ax.text(
+                    x[i],
+                    max_h * 1.08,
+                    f"{speedup:.1f}×",
+                    ha="center", va="bottom",
+                    fontsize=11, fontweight="bold", color=color,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
+                              edgecolor=color, alpha=0.85),
+                )
+        # Make headroom for the speedup boxes
+        ax.set_ylim(top=max_h * 1.25)
 
-    # Hide unused subplots
-    for idx in range(n, nrows * ncols):
-        row, col = divmod(idx, ncols)
-        axes[row][col].set_visible(False)
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=20, ha="right")
+    ax.set_ylabel("Average build time (ms)")
+    ax.set_title(
+        f"PreFigure end-to-end build time: Python vs C++  "
+        f"(n={runs} runs per diagram, mean ± stdev)",
+        fontsize=12, fontweight="bold",
+    )
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.legend(loc="upper left")
 
-    fig.suptitle("PreFigure: Python vs C++ Performance Comparison",
-                 fontsize=14, fontweight="bold", y=1.02)
     fig.tight_layout()
 
     if output_file:
         fig.savefig(output_file, dpi=150, bbox_inches="tight")
-        print(f"Plot saved to {output_file}")
+        print(f"\nPlot saved to {output_file}")
     else:
         plt.show()
+
+
+# ============================================================================
+# Summary table
+# ============================================================================
+
+def print_summary(results: list[dict], runs: int) -> None:
+    """Print a tidy summary table after all benchmarks have run."""
+    print()
+    print("=" * 78)
+    print(f"  Summary  (n = {runs} runs per diagram, times in milliseconds)")
+    print("=" * 78)
+    print(f"  {'diagram':<22} {'Python μ':>12} {'Python σ':>10} "
+          f"{'C++ μ':>12} {'C++ σ':>10}  {'speedup':>9}")
+    print("  " + "-" * 76)
+    for r in results:
+        py = f"{r['py_mean']:>12.1f}" if r["py_mean"] is not None else f"{'—':>12}"
+        pys = f"{r['py_std']:>10.1f}" if r["py_mean"] is not None else f"{'—':>10}"
+        cp = f"{r['cpp_mean']:>12.1f}" if r["cpp_mean"] is not None else f"{'—':>12}"
+        cps = f"{r['cpp_std']:>10.1f}" if r["cpp_mean"] is not None else f"{'—':>10}"
+        if r["py_mean"] and r["cpp_mean"] and r["cpp_mean"] > 0:
+            sp = f"{r['py_mean'] / r['cpp_mean']:>8.2f}×"
+        else:
+            sp = f"{'—':>9}"
+        print(f"  {r['name']:<22} {py} {pys} {cp} {cps}  {sp}")
+    print("=" * 78)
 
 
 # ============================================================================
@@ -453,94 +401,61 @@ def plot_results(results, output_file=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="PreFigure Python vs C++ performance comparison"
+        description="PreFigure end-to-end Python vs C++ benchmark "
+                    "(8 integration tests, 30 samples each by default).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
         "--runs", type=int, default=DEFAULT_RUNS,
-        help=f"Number of timed runs per benchmark (default: {DEFAULT_RUNS})"
+        help="Number of timed runs per diagram per backend.",
+    )
+    parser.add_argument(
+        "--warmup", type=int, default=DEFAULT_WARMUP,
+        help="Discard the first N runs of each backend before measuring.",
     )
     parser.add_argument(
         "--output", type=str, default=None,
-        help="Output file for the plot (e.g., comparison.png). Shows interactive plot if omitted."
+        help="Save the plot to this PNG path (otherwise opens an interactive window).",
     )
     parser.add_argument(
         "--no-cpp", action="store_true",
-        help="Skip C++ benchmarks (Python-only profiling)"
+        help="Skip the C++ backend (Python-only profiling).",
     )
     parser.add_argument(
-        "--no-full-build", action="store_true",
-        help="Skip full diagram build benchmarks (faster iteration)"
+        "--no-python", action="store_true",
+        help="Skip the Python backend (C++-only profiling).",
     )
     args = parser.parse_args()
 
-    print("=" * 60)
-    print("PreFigure: Python vs C++ Performance Comparison")
-    print("=" * 60)
-    print(f"Runs per benchmark: {args.runs}")
+    if args.no_cpp and args.no_python:
+        parser.error("Cannot pass both --no-cpp and --no-python.")
+
+    print("=" * 78)
+    print("  PreFigure end-to-end performance comparison")
+    print("=" * 78)
+    print(f"  examples dir : {EXAMPLES_DIR}")
+    print(f"  runs/diagram : {args.runs}  (warmup: {args.warmup})")
     print()
 
-    # Import modules
-    py_mods = try_import_python()
-    if py_mods:
-        print("[OK] Python prefigure library loaded")
-    else:
-        print("[!!] Python prefigure library not found")
-        print("     Install with: pip install -e .")
-        sys.exit(1)
+    py_parse = None if args.no_python else import_python_backend()
+    if py_parse is not None:
+        print("[OK] Python backend (prefig.core.parse) loaded")
+    elif not args.no_python:
+        sys.exit("ERROR: Python backend unavailable; cannot continue.")
 
-    cpp_mod = None
-    if not args.no_cpp:
-        cpp_mod = try_import_cpp()
-        if cpp_mod:
-            print("[OK] C++ _prefigure module loaded")
-        else:
-            print("[--] C++ _prefigure module not available")
-            print("     Build with: cd prefigure-cpp && ./build.sh --release")
-            print("     Then: export PYTHONPATH=prefigure-cpp/build:$PYTHONPATH")
-            print("     Running Python-only benchmarks...")
+    cpp_mod = None if args.no_cpp else import_cpp_backend()
+    if cpp_mod is not None:
+        print("[OK] C++ backend (prefig._prefigure) loaded")
+    elif not args.no_cpp:
+        print("     Continuing with Python-only timings.")
     print()
 
-    # Build benchmark suite
-    benchmarks = make_benchmarks(py_mods, cpp_mod)
+    if py_parse is None and cpp_mod is None:
+        sys.exit("ERROR: No backends available.")
 
-    # Filter out full builds if requested
-    if args.no_full_build:
-        benchmarks = [b for b in benchmarks if "Full Build" not in b["name"]]
-
-    # Run benchmarks
-    results = []
-    for i, bench in enumerate(benchmarks):
-        name = bench["name"]
-        short_name = name.replace("\n", " ")
-        print(f"[{i+1}/{len(benchmarks)}] {short_name}...", end=" ", flush=True)
-
-        py_times = bench["python"](args.runs) if bench["python"] else None
-        cpp_times = bench["cpp"](args.runs, cpp_mod) if bench["cpp"] and cpp_mod else None
-
-        result = {
-            "name": name,
-            "python_mean": statistics.mean(py_times) if py_times else None,
-            "python_std": statistics.stdev(py_times) if py_times and len(py_times) > 1 else 0,
-            "cpp_mean": statistics.mean(cpp_times) if cpp_times else None,
-            "cpp_std": statistics.stdev(cpp_times) if cpp_times and len(cpp_times) > 1 else 0,
-        }
-        results.append(result)
-
-        # Print summary
-        parts = []
-        if result["python_mean"] is not None:
-            parts.append(f"Py={result['python_mean']:.2f}ms")
-        if result["cpp_mean"] is not None:
-            parts.append(f"C++={result['cpp_mean']:.2f}ms")
-        if result["python_mean"] and result["cpp_mean"] and result["cpp_mean"] > 0:
-            speedup = result["python_mean"] / result["cpp_mean"]
-            parts.append(f"({speedup:.1f}x)")
-        print(" | ".join(parts))
-
-    print()
-    print("=" * 60)
-    print("Plotting results...")
-    plot_results(results, output_file=args.output)
+    results = run_benchmarks(py_parse, cpp_mod, runs=args.runs, warmup=args.warmup)
+    print_summary(results, runs=args.runs)
+    plot_results(results, runs=args.runs, output_file=args.output)
     print("Done.")
 
 
