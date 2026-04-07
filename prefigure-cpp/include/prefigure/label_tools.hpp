@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace prefigure {
@@ -191,7 +192,19 @@ public:
     /** @copydoc AbstractMathLabels::get_math_braille() */
     std::string get_math_braille(const std::string& id) override;
 
+    // Internal accessors used by the on-disk cache atexit hook in
+    // label_tools.cpp.  Not part of the public API.
+    static const std::unordered_map<std::string, std::string>&
+        s_svg_cache_for_atexit();
+    static const std::unordered_map<std::string, std::string>&
+        s_braille_cache_for_atexit();
+
 private:
+    // Try to render every entry in missing_ids_ via the persistent
+    // MathJax daemon.  Returns true on full success (caches updated),
+    // false on any failure (caller falls through to the legacy one-shot
+    // node mj-sre-page.js path so a broken daemon never breaks builds).
+    bool try_render_via_daemon();
     OutputFormat format_;
     bool labels_present_ = false;
 
@@ -199,12 +212,69 @@ private:
     pugi::xml_document html_doc_;
     pugi::xml_node html_body_;
 
-    // Parsed MathJax output
+    // Parsed MathJax output (only populated on a cache miss)
     pugi::xml_document label_tree_;
     bool label_tree_valid_ = false;
 
-    // Braille text cache (tactile mode)
+    // Per-instance braille text cache, keyed by label id (legacy, kept
+    // for compatibility with the existing cache-miss xpath fallback path)
     std::unordered_map<std::string, std::string> braille_cache_;
+
+    // -- Process-lifetime LaTeX -> rendered cache ---------------------------
+    //
+    // The Node.js MathJax invocation in process_math_labels() costs ~700 ms
+    // per call (Node startup + V8 boot + MathJax library load + LaTeX
+    // typesetting), and that cost dominates wall-clock build time for any
+    // diagram with math labels.  Since the LaTeX-to-rendered-SVG mapping is
+    // a pure function of the input string and the (fixed) installed MathJax
+    // version, we cache the result keyed by LaTeX text and skip the
+    // subprocess entirely when every label in a build is already cached.
+    //
+    // The caches are *static* so they persist across LocalMathLabels
+    // instance lifetimes (label.cpp::init() recreates the instance on every
+    // diagram build, but the same Python process can build many diagrams).
+    //
+    // s_svg_cache_:     LaTeX -> serialised <svg>...</svg> (sighted output)
+    // s_braille_cache_: LaTeX -> braille Unicode string (tactile output)
+    //
+    // String form is used for the SVG cache rather than a pre-parsed
+    // document because (a) it makes ownership trivial and (b) the consumer
+    // (mk_m_element in label.cpp) mutates the returned node in place, so we
+    // have to re-parse on every get anyway.  Parsing 200-byte snippets is
+    // microseconds, orders of magnitude cheaper than re-running MathJax.
+    static std::unordered_map<std::string, std::string> s_svg_cache_;
+    static std::unordered_map<std::string, std::string> s_braille_cache_;
+
+    // Per-instance: id -> LaTeX text, used to look up the cache by content
+    // for each labelled element after process_math_labels() has run.
+    std::unordered_map<std::string, std::string> id_to_text_;
+
+    // Per-instance: ids that missed the cache and were sent through the
+    // MathJax subprocess in this build.  Used at get-time to fall back to
+    // the legacy xpath-on-label_tree_ path if needed (defensive).
+    std::unordered_set<std::string> missing_ids_;
+
+    // Per-instance: pugixml documents owning the parsed cache hits returned
+    // from get_math_label().  Each call to get_math_label() parses the
+    // cached string into a fresh document, pushes it onto this vector, and
+    // returns the root <svg> node from that document.  The documents stay
+    // alive until the LocalMathLabels instance is destroyed (i.e., until
+    // the next diagram build calls label::init()), which is long enough for
+    // the caller to deep-copy the returned node into the diagram tree.
+    std::vector<std::unique_ptr<pugi::xml_document>> get_docs_;
+
+    // Per-instance counter used to suffix glyph <defs> ids on every cache
+    // hit.  MathJax assigns sequence-numbered ids like "MJX-1-TEX-N-31"
+    // within a single render, and mk_m_element later rewrites those ids by
+    // prepending the diagram-id prefix.  If two labels in the same build
+    // share the same LaTeX text, they would both come out of the cache with
+    // identical glyph ids and produce duplicate ids in the output document.
+    // By appending a fresh "-r{N}" suffix on every get, we keep every
+    // emitted glyph id unique within the build.  Per-instance (not static)
+    // so every build gets a fresh sequence starting at 1, which makes
+    // warm-cache output byte-identical to cold-cache output for diagrams
+    // without repeated labels.
+    int render_counter_ = 0;
 };
 
 // ---------------------------------------------------------------------------

@@ -146,7 +146,32 @@ Here is a summary of PreFigure commands.
     prefig validate foo.xml
     ```
 
+### Profiling and benchmarking
 
+PreFigure ships with a high-performance C++ backend (compiled into the
+`_prefigure` extension module) alongside the reference Python implementation.
+The `profiling_comparison.py` script at the repository root benchmarks both
+backends end-to-end against the eight example diagrams and produces a
+side-by-side bar chart of the per-diagram averages with speedup ratios.
+
+Run the full benchmark with:
+
+```
+.venv/bin/python profiling_comparison.py
+```
+
+Profile a single example in isolation with:
+
+```
+.venv/bin/python profiling_comparison.py --diagram tangent
+```
+
+The bar chart is auto-saved to a timestamped path under `/tmp/` (the path is
+printed at the end of the run) and the script never blocks unless you
+explicitly pass `--show`. For the full reference — including all CLI flags,
+single-diagram targeting, cold-vs-warm interpretation, the MathJax caching
+architecture, and reproducible numbers — see
+[`prefigure-cpp/docs/guide/profiling.rst`](prefigure-cpp/docs/guide/profiling.rst).
 
 You may wish to perform the following steps to set up your authoring environment (these are automatically performed in a codespace):
 

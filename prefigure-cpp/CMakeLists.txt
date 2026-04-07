@@ -222,6 +222,7 @@ target_include_directories(prefigure PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/exprtk
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/rapidcsv
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json
 )
 
 target_link_libraries(prefigure PUBLIC

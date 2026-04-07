@@ -98,14 +98,10 @@ SVG output for structural equivalence.
 Performance Benchmarking
 ------------------------
 
-The ``profiling_comparison.py`` script benchmarks Python vs C++ across
-micro-benchmarks and full diagram builds::
-
-    source .venv/bin/activate
-    python3 profiling_comparison.py --runs 5 --output results.png
-
-This produces a matplotlib plot with side-by-side bar charts for each benchmark,
-including speedup ratios.
+For benchmarking the Python vs C++ backends end-to-end across the eight
+example diagrams — with full coverage of single-diagram targeting,
+cold-vs-warm reporting, and the MathJax cache architecture — see the
+dedicated :doc:`profiling` guide.
 
 Adding a New Test
 -----------------

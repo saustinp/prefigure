@@ -18,4 +18,5 @@ SVG output, but runs significantly faster for batch processing.
    expression_eval
    coordinate_transforms
    python_bindings
+   profiling
    testing

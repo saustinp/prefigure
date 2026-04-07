@@ -3,8 +3,8 @@
 PreFigure: Python vs C++ end-to-end performance comparison.
 
 For each of the 8 example XML diagrams, this script runs the full build
-pipeline 30 times against both backends, computes per-diagram averages,
-and renders a side-by-side bar chart of the results.
+pipeline a configurable number of times against both backends, computes
+per-diagram averages, and renders a side-by-side bar chart of the results.
 
 The two backends are dispatched directly (no auto-selection):
 
@@ -18,12 +18,41 @@ silently switches to C++ whenever the extension is importable).
 
 USAGE
 -----
-From the repository root, with the editable install built:
+From the repository root, with the editable install built::
 
+    # Run all 8 examples, default 30 runs each, both backends, save the chart
+    # to a timestamped file under /tmp/ and print its path:
     .venv/bin/python profiling_comparison.py
+
+    # List the available example diagrams and exit:
+    .venv/bin/python profiling_comparison.py --list
+
+    # Profile a single diagram in isolation (suffix-insensitive,
+    # case-insensitive):
+    .venv/bin/python profiling_comparison.py --diagram tangent
+    .venv/bin/python profiling_comparison.py -d tangent.xml
+
+    # Multiple diagrams at once:
+    .venv/bin/python profiling_comparison.py -d diffeqs -d roots_of_unity
+
+    # Honest first-time-user measurement (wipe disk cache, report cold call):
+    rm -rf ~/.cache/prefigure
+    .venv/bin/python profiling_comparison.py --runs 30 --report-cold
+
+    # Save the chart to a specific path instead of /tmp/:
     .venv/bin/python profiling_comparison.py --runs 30 --output prof.png
+
+    # Skip a backend (useful when one isn't built):
     .venv/bin/python profiling_comparison.py --no-cpp     # Python only
-    .venv/bin/python profiling_comparison.py --warmup 2   # discard first N
+    .venv/bin/python profiling_comparison.py --no-python  # C++ only
+
+    # Increase or decrease the warmup discard count:
+    .venv/bin/python profiling_comparison.py --warmup 2   # discard first 2
+
+    # ALSO open the matplotlib window (blocking — script waits for the
+    # window to close).  Without this flag the script always saves the
+    # chart and returns immediately, which is what you want for CI use:
+    .venv/bin/python profiling_comparison.py --show
 
 REQUIREMENTS
 ------------
@@ -31,6 +60,10 @@ REQUIREMENTS
 * The C++ extension module importable as ``prefig._prefigure``.
   Build it with ``pip install -e .`` from the repo root.
 * matplotlib + numpy (already pulled in by ``pip install -e .[dev]``).
+
+See ``prefigure-cpp/docs/guide/profiling.rst`` for the full reference,
+including the cold-vs-warm interpretation, the MathJax cache architecture,
+and reproducible benchmark numbers.
 """
 
 from __future__ import annotations
@@ -177,18 +210,61 @@ def make_cpp_runner(cpp_mod, xml_path: str) -> Callable[[], None]:
 # Benchmark driver
 # ============================================================================
 
-def run_benchmarks(py_parse, cpp_mod, *, runs: int, warmup: int):
-    """Run all 8 integration tests against both backends.
+def _measure_cold(runner: Callable[[], None]) -> float:
+    """Run ``runner`` once with no warmup and return the elapsed milliseconds.
+
+    The very first ``parse()`` call after process startup pays the full
+    MathJax startup cost (~700 ms), since the Node.js subprocess has to
+    spawn, V8 has to boot, the MathJax library has to load, and every label
+    has to be typeset from scratch into the LaTeX→SVG cache.  Subsequent
+    calls hit the cache and are 50–100× faster.  This function exists so
+    we can report that one-time cold cost separately from the warm-cache
+    averages that everyone actually cares about.
+    """
+    start = time.perf_counter()
+    runner()
+    return (time.perf_counter() - start) * 1000.0
+
+
+def run_benchmarks(py_parse, cpp_mod, *, runs: int, warmup: int,
+                   report_cold: bool = False,
+                   only: Optional[list[str]] = None):
+    """Run the integration tests against both backends.
 
     Returns a list of result dicts, one per example, with keys:
         name, py_times, py_mean, py_std, cpp_times, cpp_mean, cpp_std
+        (and py_cold_ms / cpp_cold_ms when ``report_cold`` is set)
     Missing backends produce None entries (not zeros) so the plotter can
     distinguish a missing measurement from a real zero.
+
+    If ``only`` is supplied, only those diagram names (with or without the
+    .xml suffix, case-insensitive) are timed.  Unknown names raise
+    RuntimeError so a typo on the command line doesn't silently produce
+    an empty benchmark.
     """
     results = []
     available = [f for f in EXAMPLE_FILES if (EXAMPLES_DIR / f).exists()]
     if not available:
         raise RuntimeError(f"No example files found under {EXAMPLES_DIR}")
+
+    if only:
+        # Normalise: drop ".xml", lowercase
+        wanted = {n.lower().removesuffix(".xml") for n in only}
+        known = {f.lower().removesuffix(".xml"): f for f in available}
+        unknown = wanted - known.keys()
+        if unknown:
+            raise RuntimeError(
+                "Unknown diagram name(s): " + ", ".join(sorted(unknown)) +
+                "\nAvailable: " + ", ".join(sorted(known.keys())))
+        available = [known[n] for n in sorted(wanted)]
+
+    if warmup < 1:
+        print(
+            "WARNING: --warmup is < 1.  The first timed run for each diagram "
+            "will pay the one-time MathJax startup cost (~700 ms).  Pass "
+            "--warmup 1 (or higher) so the LaTeX→SVG cache is populated "
+            "before the timed runs begin.\n"
+        )
 
     width = max(len(name) for name in available)
 
@@ -196,6 +272,8 @@ def run_benchmarks(py_parse, cpp_mod, *, runs: int, warmup: int):
         xml_path = str(EXAMPLES_DIR / fname)
         label = fname.replace(".xml", "")
 
+        py_cold_ms: Optional[float] = None
+        cpp_cold_ms: Optional[float] = None
         py_times: Optional[list[float]] = None
         cpp_times: Optional[list[float]] = None
 
@@ -204,6 +282,10 @@ def run_benchmarks(py_parse, cpp_mod, *, runs: int, warmup: int):
         if py_parse is not None:
             try:
                 runner = make_python_runner(py_parse, xml_path)
+                if report_cold:
+                    # Measure the very first call before any warmup, while
+                    # the LaTeX→SVG cache is still cold for this diagram.
+                    py_cold_ms = _measure_cold(runner)
                 py_times = time_fn(runner, runs=runs, warmup=warmup)
             except Exception as exc:
                 print(f"\n     [!] Python backend failed: {exc}")
@@ -212,6 +294,8 @@ def run_benchmarks(py_parse, cpp_mod, *, runs: int, warmup: int):
         if cpp_mod is not None:
             try:
                 runner = make_cpp_runner(cpp_mod, xml_path)
+                if report_cold:
+                    cpp_cold_ms = _measure_cold(runner)
                 cpp_times = time_fn(runner, runs=runs, warmup=warmup)
             except Exception as exc:
                 print(f"\n     [!] C++ backend failed: {exc}")
@@ -237,9 +321,11 @@ def run_benchmarks(py_parse, cpp_mod, *, runs: int, warmup: int):
             "py_times": py_times,
             "py_mean": py_mean,
             "py_std": py_std,
+            "py_cold_ms": py_cold_ms,
             "cpp_times": cpp_times,
             "cpp_mean": cpp_mean,
             "cpp_std": cpp_std,
+            "cpp_cold_ms": cpp_cold_ms,
         })
 
     return results
@@ -249,7 +335,8 @@ def run_benchmarks(py_parse, cpp_mod, *, runs: int, warmup: int):
 # Plotting
 # ============================================================================
 
-def plot_results(results: list[dict], runs: int, output_file: Optional[str]) -> None:
+def plot_results(results: list[dict], runs: int, output_file: Optional[str],
+                 show: bool = False) -> None:
     """Render a single grouped bar chart with one (Py, C++) pair per example.
 
     The Python and C++ averages are placed side by side for each diagram, with
@@ -352,8 +439,8 @@ def plot_results(results: list[dict], runs: int, output_file: Optional[str]) -> 
     ax.set_xticklabels(names, rotation=20, ha="right")
     ax.set_ylabel("Average build time (ms)")
     ax.set_title(
-        f"PreFigure end-to-end build time: Python vs C++  "
-        f"(n={runs} runs per diagram, mean ± stdev)",
+        "PreFigure end-to-end build time: Python vs C++  "
+        f"(warm cache, n={runs} runs per diagram, mean ± stdev)",
         fontsize=12, fontweight="bold",
     )
     ax.grid(axis="y", alpha=0.3)
@@ -362,10 +449,20 @@ def plot_results(results: list[dict], runs: int, output_file: Optional[str]) -> 
 
     fig.tight_layout()
 
-    if output_file:
-        fig.savefig(output_file, dpi=150, bbox_inches="tight")
-        print(f"\nPlot saved to {output_file}")
-    else:
+    # Always save the plot to disk so the script never blocks waiting for an
+    # interactive matplotlib window to be dismissed.  When the user passes
+    # --output, save there.  Otherwise, save to a fresh path under the temp
+    # directory and print it.  Only call plt.show() (which is blocking) when
+    # the user explicitly asks for it via --show.
+    if not output_file:
+        import tempfile
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_file = str(Path(tempfile.gettempdir()) / f"prefigure-profile-{ts}.png")
+    fig.savefig(output_file, dpi=150, bbox_inches="tight")
+    print(f"\nPlot saved to {output_file}")
+
+    if show:
         plt.show()
 
 
@@ -374,25 +471,55 @@ def plot_results(results: list[dict], runs: int, output_file: Optional[str]) -> 
 # ============================================================================
 
 def print_summary(results: list[dict], runs: int) -> None:
-    """Print a tidy summary table after all benchmarks have run."""
+    """Print a tidy summary table after all benchmarks have run.
+
+    The "warm" columns are the average over ``runs`` post-warmup samples,
+    where the LaTeX→SVG cache is fully populated.  When the benchmark was
+    invoked with ``--report-cold``, two extra columns show the wall-clock
+    cost of the very first call (which includes the one-time MathJax
+    startup of ~700 ms).
+    """
+    has_cold = any(r.get("py_cold_ms") is not None or r.get("cpp_cold_ms") is not None
+                   for r in results)
+
     print()
-    print("=" * 78)
-    print(f"  Summary  (n = {runs} runs per diagram, times in milliseconds)")
-    print("=" * 78)
-    print(f"  {'diagram':<22} {'Python μ':>12} {'Python σ':>10} "
-          f"{'C++ μ':>12} {'C++ σ':>10}  {'speedup':>9}")
-    print("  " + "-" * 76)
+    width = 110 if has_cold else 78
+    print("=" * width)
+    print(f"  Summary  (warm cache, n = {runs} runs per diagram, times in milliseconds)")
+    print("=" * width)
+
+    if has_cold:
+        print(f"  {'diagram':<22} {'Python μ':>10} {'Python σ':>9} "
+              f"{'cold Py':>9}  {'C++ μ':>10} {'C++ σ':>9} {'cold C++':>10}  {'speedup':>9}")
+    else:
+        print(f"  {'diagram':<22} {'Python μ':>12} {'Python σ':>10} "
+              f"{'C++ μ':>12} {'C++ σ':>10}  {'speedup':>9}")
+    print("  " + "-" * (width - 2))
+
     for r in results:
-        py = f"{r['py_mean']:>12.1f}" if r["py_mean"] is not None else f"{'—':>12}"
-        pys = f"{r['py_std']:>10.1f}" if r["py_mean"] is not None else f"{'—':>10}"
-        cp = f"{r['cpp_mean']:>12.1f}" if r["cpp_mean"] is not None else f"{'—':>12}"
-        cps = f"{r['cpp_std']:>10.1f}" if r["cpp_mean"] is not None else f"{'—':>10}"
         if r["py_mean"] and r["cpp_mean"] and r["cpp_mean"] > 0:
             sp = f"{r['py_mean'] / r['cpp_mean']:>8.2f}×"
         else:
             sp = f"{'—':>9}"
-        print(f"  {r['name']:<22} {py} {pys} {cp} {cps}  {sp}")
-    print("=" * 78)
+
+        if has_cold:
+            py = f"{r['py_mean']:>10.1f}" if r["py_mean"] is not None else f"{'—':>10}"
+            pys = f"{r['py_std']:>9.1f}" if r["py_mean"] is not None else f"{'—':>9}"
+            pyc = (f"{r['py_cold_ms']:>9.1f}"
+                   if r.get("py_cold_ms") is not None else f"{'—':>9}")
+            cp = f"{r['cpp_mean']:>10.1f}" if r["cpp_mean"] is not None else f"{'—':>10}"
+            cps = f"{r['cpp_std']:>9.1f}" if r["cpp_mean"] is not None else f"{'—':>9}"
+            cpc = (f"{r['cpp_cold_ms']:>10.1f}"
+                   if r.get("cpp_cold_ms") is not None else f"{'—':>10}")
+            print(f"  {r['name']:<22} {py} {pys} {pyc}  {cp} {cps} {cpc}  {sp}")
+        else:
+            py = f"{r['py_mean']:>12.1f}" if r["py_mean"] is not None else f"{'—':>12}"
+            pys = f"{r['py_std']:>10.1f}" if r["py_mean"] is not None else f"{'—':>10}"
+            cp = f"{r['cpp_mean']:>12.1f}" if r["cpp_mean"] is not None else f"{'—':>12}"
+            cps = f"{r['cpp_std']:>10.1f}" if r["cpp_mean"] is not None else f"{'—':>10}"
+            print(f"  {r['name']:<22} {py} {pys} {cp} {cps}  {sp}")
+
+    print("=" * width)
 
 
 # ============================================================================
@@ -415,7 +542,12 @@ def main():
     )
     parser.add_argument(
         "--output", type=str, default=None,
-        help="Save the plot to this PNG path (otherwise opens an interactive window).",
+        help=(
+            "Save the plot to this PNG path.  When omitted, the plot is "
+            "auto-saved to /tmp/prefigure-profile-<timestamp>.png and the "
+            "path is printed at the end of the run.  Pass --show to also "
+            "open it in an interactive matplotlib window."
+        ),
     )
     parser.add_argument(
         "--no-cpp", action="store_true",
@@ -425,7 +557,47 @@ def main():
         "--no-python", action="store_true",
         help="Skip the Python backend (C++-only profiling).",
     )
+    parser.add_argument(
+        "--report-cold", action="store_true",
+        help=(
+            "Also measure and report the cost of the very first call per "
+            "diagram, before any warmup runs.  The first call pays the one-"
+            "time MathJax startup cost (~700 ms) that subsequent cached "
+            "calls avoid.  Adds two columns ('cold Py' / 'cold C++') to the "
+            "summary table; the bar chart still shows warm-cache averages."
+        ),
+    )
+    parser.add_argument(
+        "--diagram", "-d", action="append", default=None, metavar="NAME",
+        help=(
+            "Restrict the benchmark to one or more diagrams.  NAME may be "
+            "given with or without the '.xml' suffix; matching is "
+            "case-insensitive.  Pass the flag multiple times to select "
+            "several diagrams (e.g. '--diagram tangent --diagram diffeqs'). "
+            "Without this flag the script runs all 8 example diagrams."
+        ),
+    )
+    parser.add_argument(
+        "--list", action="store_true",
+        help="List the available example diagrams and exit.",
+    )
+    parser.add_argument(
+        "--show", action="store_true",
+        help=(
+            "Open an interactive matplotlib window after saving the plot. "
+            "This call is BLOCKING — the script waits for you to close the "
+            "window before exiting.  Without this flag the script always "
+            "saves the plot to a file and returns immediately."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.list:
+        print("Available example diagrams (in " + str(EXAMPLES_DIR) + "):")
+        for f in EXAMPLE_FILES:
+            mark = " " if (EXAMPLES_DIR / f).exists() else "?"
+            print(f"  {mark} {f.replace('.xml', '')}")
+        sys.exit(0)
 
     if args.no_cpp and args.no_python:
         parser.error("Cannot pass both --no-cpp and --no-python.")
@@ -453,9 +625,20 @@ def main():
     if py_parse is None and cpp_mod is None:
         sys.exit("ERROR: No backends available.")
 
-    results = run_benchmarks(py_parse, cpp_mod, runs=args.runs, warmup=args.warmup)
+    try:
+        results = run_benchmarks(
+            py_parse, cpp_mod,
+            runs=args.runs,
+            warmup=args.warmup,
+            report_cold=args.report_cold,
+            only=args.diagram,
+        )
+    except RuntimeError as exc:
+        # Surface --diagram typos and similar setup errors as a clean
+        # one-line message instead of an internal stack trace.
+        sys.exit(f"ERROR: {exc}")
     print_summary(results, runs=args.runs)
-    plot_results(results, runs=args.runs, output_file=args.output)
+    plot_results(results, runs=args.runs, output_file=args.output, show=args.show)
     print("Done.")
 
 
