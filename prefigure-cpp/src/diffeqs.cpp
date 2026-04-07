@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -480,17 +482,23 @@ void plot_de_solution(XmlNode element, Diagram& diagram, XmlNode parent, Outline
 
     int n_pts = static_cast<int>(solution.cols());
 
-    // Build SVG path commands
-    std::vector<std::string> cmds;
+    // Build SVG path attribute directly into a single reserved string.  The
+    // previous vector<string>+pt2str+join pattern allocated ~5 strings per
+    // sample point and showed up under pt2str in the implicit profile (the
+    // same hot pattern appears here for ODE solution plotting, where N is
+    // typically 100-500 points per <plot-de-solution>).
+    std::string d;
+    d.reserve(static_cast<size_t>(n_pts) * 24);
+    auto out = std::back_inserter(d);
     {
         Point2d p = diagram.transform(Point2d(solution(x_row, 0),
                                                solution(y_row, 0)));
-        cmds.push_back("M " + pt2str(p));
+        std::format_to(out, "M {:.1f} {:.1f}", p[0], p[1]);
     }
     for (int i = 1; i < n_pts; ++i) {
         Point2d p = diagram.transform(Point2d(solution(x_row, i),
                                                solution(y_row, i)));
-        cmds.push_back("L " + pt2str(p));
+        std::format_to(out, " L {:.1f} {:.1f}", p[0], p[1]);
     }
 
     // Default styling
@@ -543,15 +551,16 @@ void plot_de_solution(XmlNode element, Diagram& diagram, XmlNode parent, Outline
                         }
                     }
 
-                    // Build a sub-path from (index - 5) to index
+                    // Append a sub-path from (index - 5) to index to the
+                    // same d-string built above.
                     int start = std::max(index - 5, 0);
                     Point2d p = diagram.transform(
                         Point2d(solution(x_row, start), solution(y_row, start)));
-                    cmds.push_back("M " + pt2str(p));
+                    std::format_to(out, " M {:.1f} {:.1f}", p[0], p[1]);
                     for (int i = start + 1; i <= index; ++i) {
                         p = diagram.transform(
                             Point2d(solution(x_row, i), solution(y_row, i)));
-                        cmds.push_back("L " + pt2str(p));
+                        std::format_to(out, " L {:.1f} {:.1f}", p[0], p[1]);
                     }
                 }
             }
@@ -559,12 +568,6 @@ void plot_de_solution(XmlNode element, Diagram& diagram, XmlNode parent, Outline
     }
 
 after_arrow:
-    // Join path commands
-    std::string d;
-    for (const auto& s : cmds) {
-        if (!d.empty()) d += " ";
-        d += s;
-    }
     path.append_attribute("d").set_value(d.c_str());
 
     // Clip to bbox

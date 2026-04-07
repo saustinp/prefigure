@@ -5,6 +5,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include <format>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -60,11 +62,15 @@ void parametric_curve(XmlNode element, Diagram& diagram, XmlNode parent, Outline
     double t = domain[0];
     double dt = (domain[1] - domain[0]) / N;
 
-    // Build the path commands
-    std::vector<std::string> points;
+    // Build the SVG path attribute directly into a single reserved string.
+    // (Replaced the previous vector<string>+pt2str+join pattern, which
+    // allocated ~5 strings per sample point.)
+    std::string d;
+    d.reserve(static_cast<size_t>(N + 8) * 24);
+    auto out = std::back_inserter(d);
     try {
         Point2d p = diagram.transform(f(Value(t)).as_point());
-        points.push_back("M " + pt2str(p));
+        std::format_to(out, "M {:.1f} {:.1f}", p[0], p[1]);
     } catch (...) {
         spdlog::error("Error evaluating parametric-curve function at t={}", t);
         return;
@@ -74,14 +80,14 @@ void parametric_curve(XmlNode element, Diagram& diagram, XmlNode parent, Outline
         t += dt;
         try {
             Point2d p = diagram.transform(f(Value(t)).as_point());
-            points.push_back("L " + pt2str(p));
+            std::format_to(out, " L {:.1f} {:.1f}", p[0], p[1]);
         } catch (...) {
             continue;
         }
     }
 
     if (get_attr(element, "closed", "no") == "yes") {
-        points.push_back("Z");
+        d += " Z";
     }
 
     // Arrow location sub-path
@@ -92,22 +98,15 @@ void parametric_curve(XmlNode element, Diagram& diagram, XmlNode parent, Outline
         t = arrow_location - num_pts * dt;
         try {
             Point2d p = diagram.transform(f(Value(t)).as_point());
-            points.push_back("M " + pt2str(p));
+            std::format_to(out, " M {:.1f} {:.1f}", p[0], p[1]);
         } catch (...) {}
         for (int i = 0; i < num_pts; ++i) {
             t += dt;
             try {
                 Point2d p = diagram.transform(f(Value(t)).as_point());
-                points.push_back("L " + pt2str(p));
+                std::format_to(out, " L {:.1f} {:.1f}", p[0], p[1]);
             } catch (...) {}
         }
-    }
-
-    // Join all path commands
-    std::string d;
-    for (const auto& s : points) {
-        if (!d.empty()) d += " ";
-        d += s;
     }
 
     // Set default attributes

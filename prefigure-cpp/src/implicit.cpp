@@ -1,11 +1,15 @@
 #include "prefigure/implicit.hpp"
 #include "prefigure/diagram.hpp"
 #include "prefigure/math_utilities.hpp"
+#include "prefigure/user_namespace.hpp"
 #include "prefigure/utilities.hpp"
 
 #include <spdlog/spdlog.h>
 
 #include <cmath>
+#include <format>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,11 +19,25 @@ namespace prefigure {
 static void finish_outline_implicit(XmlNode element, Diagram& diagram, XmlNode parent);
 
 // LevelSet: wraps f(x,y) - k
+//
+// We hold both a CompiledFunction2 (raw function pointer dispatch, no
+// std::function shim, no Value variant copy/destroy at the boundary) and
+// the original MathFunction2 as a fallback.  The fast path is taken when
+// the user function is a registered scalar 2-arg user function -- which
+// is the case for `<implicit-curve function="f"/>` in every example we've
+// shipped.  Vector-valued or attribute-expression functions fall back to
+// the std::function path automatically.
 struct LevelSet {
-    MathFunction2 f;
+    MathFunction2 f;                            // always set
+    std::optional<CompiledFunction2> fast;      // set when scalar fast path is available
     double k;
 
-    double value(const Point2d& p) const {
+    inline double value(const Point2d& p) const {
+        if (fast) {
+            // ~1 indirect call + the inline AST walk -- no Value variants,
+            // no std::function machinery, no exception frames at all.
+            return (*fast)(p[0], p[1]) - k;
+        }
         Value vx(p[0]);
         Value vy(p[1]);
         return f(vx, vy).to_double() - k;
@@ -142,21 +160,36 @@ void implicit_curve(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
 
     BBox bbox = diagram.bbox();
 
-    // Get function
+    // Get function.  We resolve two views in parallel:
+    //   1. The MathFunction2 / std::function path (always available; works
+    //      for vector-valued functions and inline expressions).
+    //   2. A CompiledFunction2 raw-function-pointer view, available only
+    //      when the attribute is a bare identifier referring to a registered
+    //      scalar 2-arg user function.  This is the path the implicit
+    //      example takes (`function="f"` where `f(x,y) = y^2 - x^3 + x`).
+    //
+    // The hot LevelSet::value loop prefers the compiled view when present
+    // and falls back to the std::function path otherwise.  Both views are
+    // resolved here once at element-handler time, so the inner loop never
+    // touches the namespace map or pays for any lookup.
     MathFunction2 f;
+    std::optional<CompiledFunction2> f_compiled;
     try {
-        auto val = diagram.expr_ctx().eval(element.attribute("function").value());
+        const char* func_attr = element.attribute("function").value();
+        auto val = diagram.expr_ctx().eval(func_attr);
         if (val.is_function2()) {
             f = val.as_function2();
         } else if (val.is_function()) {
-            // Wrap single-arg function: user might give f(x,y) as a 2-arg
             spdlog::error("Error in <implicit-curve>: function must take two arguments");
             return;
         } else {
-            spdlog::error("Error in <implicit-curve> retrieving function={}",
-                          element.attribute("function").value());
+            spdlog::error("Error in <implicit-curve> retrieving function={}", func_attr);
             return;
         }
+        // Try to get the raw-function-pointer view as well.  Returns
+        // nullopt if the attribute isn't a bare identifier or if the
+        // function isn't a registered scalar 2-arg user function.
+        f_compiled = diagram.expr_ctx().get_compiled_scalar2(func_attr);
     } catch (...) {
         spdlog::error("Error in <implicit-curve> retrieving function={}",
                       get_attr(element, "function", ""));
@@ -186,7 +219,7 @@ void implicit_curve(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
         initial_depth = 4;
     }
 
-    LevelSet levelset{f, k};
+    LevelSet levelset{f, f_compiled, k};
 
     // Build quad tree and find segments
     QuadTree root({
@@ -223,19 +256,24 @@ void implicit_curve(XmlNode element, Diagram& diagram, XmlNode parent, OutlineSt
         }
     }
 
-    // Build SVG path
-    std::vector<std::string> cmds;
+    // Build SVG path.  This used to assemble a std::vector<std::string> of
+    // ~2N entries via per-segment pt2str() (4 std::format calls + 5 string
+    // allocations per segment) and then join them into the final d-string in
+    // a second loop.  Profiling implicit.xml showed pt2str + std::format at
+    // ~9.4% of total time.  We now write directly into a single reserved
+    // string with one std::format_to call per segment, eliminating ~3 of 4
+    // allocations per segment and the entire intermediate vector.
+    std::string d;
+    // Each "M xxxx.x yyyy.y L xxxx.x yyyy.y " is at most ~40 chars; reserve
+    // a generous slack so the back_inserter never reallocates.
+    d.reserve(all_segments.size() * 48);
+    auto out = std::back_inserter(d);
     for (const auto& s : all_segments) {
         Point2d s0 = diagram.transform(Point2d(s.start[0], s.start[1]));
         Point2d s1 = diagram.transform(Point2d(s.end[0], s.end[1]));
-        cmds.push_back("M " + pt2str(s0));
-        cmds.push_back("L " + pt2str(s1));
-    }
-
-    std::string d;
-    for (const auto& c : cmds) {
-        if (!d.empty()) d += " ";
-        d += c;
+        if (!d.empty()) d += ' ';
+        std::format_to(out, "M {:.1f} {:.1f} L {:.1f} {:.1f}",
+                       s0[0], s0[1], s1[0], s1[1]);
     }
 
     XmlNode path = diagram.get_scratch().append_child("path");

@@ -5,6 +5,8 @@
 #include <spdlog/spdlog.h>
 
 #include <cmath>
+#include <format>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -117,9 +119,11 @@ void area_between_curves(XmlNode element, Diagram& diagram, XmlNode parent, Outl
     double x = domain[0];
 
     // Build path: forward trace f, backward trace g
-    std::vector<std::string> cmds;
+    // Build path attribute directly into a single reserved string.
+    std::string d;
+    d.reserve(static_cast<size_t>(2 * (N + 1) + 2) * 24);
+    auto out = std::back_inserter(d);
 
-    // First point
     auto eval_point = [&](double xx, const MathFunction& func) -> Point2d {
         if (polar) {
             double r = func(Value(xx)).to_double();
@@ -131,7 +135,7 @@ void area_between_curves(XmlNode element, Diagram& diagram, XmlNode parent, Outl
 
     try {
         Point2d p = eval_point(x, f);
-        cmds.push_back("M " + pt2str(p));
+        std::format_to(out, "M {:.1f} {:.1f}", p[0], p[1]);
     } catch (...) {
         spdlog::error("Error evaluating area function");
         return;
@@ -141,7 +145,7 @@ void area_between_curves(XmlNode element, Diagram& diagram, XmlNode parent, Outl
     for (int i = 0; i <= N; ++i) {
         try {
             Point2d p = eval_point(x, f);
-            cmds.push_back("L " + pt2str(p));
+            std::format_to(out, " L {:.1f} {:.1f}", p[0], p[1]);
         } catch (...) {}
         x += dx;
     }
@@ -151,16 +155,10 @@ void area_between_curves(XmlNode element, Diagram& diagram, XmlNode parent, Outl
         x -= dx;
         try {
             Point2d p = eval_point(x, g);
-            cmds.push_back("L " + pt2str(p));
+            std::format_to(out, " L {:.1f} {:.1f}", p[0], p[1]);
         } catch (...) {}
     }
-    cmds.push_back("Z");
-
-    std::string d;
-    for (const auto& c : cmds) {
-        if (!d.empty()) d += " ";
-        d += c;
-    }
+    d += " Z";
 
     // Create SVG path
     XmlNode path = diagram.get_scratch().append_child("path");

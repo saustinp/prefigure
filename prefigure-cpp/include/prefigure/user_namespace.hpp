@@ -15,6 +15,54 @@
 
 namespace prefigure {
 
+// Forward declaration for the cached exprtk parser/symbol_table state.  The
+// definition lives in user_namespace.cpp so this header doesn't need to drag
+// in the ~16k-line exprtk.hpp.
+struct ExprtkState;
+
+// Forward declaration of the per-function compiled state holder.  Definition
+// is private to user_namespace.cpp.
+struct CompiledScalar2State;
+
+/**
+ * @brief A raw-function-pointer view onto a 2-argument scalar user function.
+ *
+ * The general MathFunction2 API uses std::function<Value(Value, Value)>,
+ * which costs one indirect call (via the function-handler vtable), one or
+ * two heap-allocated callable bodies, and Value-variant copy/destroy on
+ * every invocation.  For the inner-loop callsites in implicit.cpp /
+ * slope_field.cpp / diffeqs.cpp, that overhead was large enough to be
+ * visible in the perf profile.
+ *
+ * CompiledFunction2 is the lighter alternative.  It's a 16-byte POD that
+ * holds a raw function pointer (`invoke_`) and an opaque data pointer
+ * (`impl_`).  Calling it costs exactly one indirect call -- the same as
+ * any plain `double(*)(double, double)` function pointer would.  All the
+ * inner machinery is hidden inside the static dispatcher function whose
+ * address is stored in `invoke_`.
+ *
+ * Obtain one with ExpressionContext::get_compiled_scalar2().  The returned
+ * object is only valid as long as the ExpressionContext (and the underlying
+ * compiled AST it wraps) is alive -- which in practice means "for the
+ * duration of the current diagram parse," and is guaranteed by Diagram's
+ * lifetime.
+ */
+struct CompiledFunction2 {
+    using InvokeFn = double(*)(const void*, double, double);
+
+    const void* impl_ = nullptr;
+    InvokeFn invoke_ = nullptr;
+
+    bool valid() const noexcept { return invoke_ != nullptr; }
+
+    // Single-instruction-call hot-path entry point: just one indirect
+    // call to invoke_, which is a static function so the compiler can
+    // inline through it once profile-guided optimisation kicks in.
+    inline double operator()(double x, double y) const {
+        return invoke_(impl_, x, y);
+    }
+};
+
 /**
  * @brief Safe evaluation context for mathematical expressions authored in XML.
  *
@@ -184,6 +232,28 @@ public:
      */
     void finish_breaks();
 
+    /**
+     * @brief Look up a 2-arg scalar user function by name and return a raw
+     *        function-pointer view of it for hot inner loops.
+     *
+     * `name_or_expr` is typically the literal value of the XML `function="..."`
+     * attribute, e.g. `"f"`.  We accept whitespace around the name.  If the
+     * expression is anything more complex (e.g. an inline expression or a
+     * function-of-function), this returns std::nullopt and the caller falls
+     * back to the regular MathFunction2 path.
+     *
+     * The function must have been defined via a 2-arg `f(x,y) = ...`
+     * definition AND must have been eligible for the scalar fast path
+     * (is_scalar_only true at definition time).  If either condition fails,
+     * std::nullopt is returned.
+     *
+     * @return CompiledFunction2 wrapping a raw function pointer, or
+     *         std::nullopt if the function isn't a registered scalar
+     *         2-arg user function.
+     */
+    std::optional<CompiledFunction2>
+    get_compiled_scalar2(const std::string& name_or_expr) const;
+
 private:
     // The namespace: maps names to values
     std::unordered_map<std::string, Value> namespace_;
@@ -198,6 +268,23 @@ private:
     std::vector<double> breaks_storage_;
     std::vector<double>* breaks_ = nullptr;
     bool delta_on_ = false;
+
+    // Cached exprtk parser + symbol_table.  Constructing the parser is
+    // expensive (it builds large internal operator/identifier tables); the
+    // pre-Phase-1.5 code constructed a fresh parser on every label/attribute
+    // eval, which showed up at ~3% of total runtime in the implicit profile.
+    // Created lazily on first eval() call.  Held by unique_ptr so we don't
+    // need to include exprtk.hpp from this header.
+    std::unique_ptr<ExprtkState> exprtk_state_;
+
+    // Per-function compiled state for the scalar 2-arg fast path used by
+    // CompiledFunction2.  Each entry holds the AST shared pointer plus a
+    // back-reference to this context, so the dispatcher can find them via
+    // a single pointer-cast.  Stable addresses are required (the
+    // CompiledFunction2 holds a raw pointer into the value), so we use
+    // unique_ptr<...> as the value type rather than the bare struct.
+    std::unordered_map<std::string, std::unique_ptr<CompiledScalar2State>>
+        compiled_scalar2_;
 
     // Pre-process expression: handle ^ substitution, detect tuples
     std::string preprocess(const std::string& expr, bool substitution) const;

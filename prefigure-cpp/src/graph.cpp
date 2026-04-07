@@ -16,12 +16,25 @@ namespace prefigure {
 
 // Forward declarations
 static void finish_outline_graph(XmlNode element, Diagram& diagram, XmlNode parent);
-static std::vector<std::string> cartesian_path(XmlNode element, Diagram& diagram,
-                                                const MathFunction& f,
-                                                const std::array<double, 2>& domain, int N);
-static std::vector<std::string> polar_path(XmlNode element, Diagram& diagram,
-                                            const MathFunction& f,
-                                            const std::array<double, 2>& domain, int N);
+static std::string cartesian_path(XmlNode element, Diagram& diagram,
+                                  const MathFunction& f,
+                                  const std::array<double, 2>& domain, int N);
+static std::string polar_path(XmlNode element, Diagram& diagram,
+                              const MathFunction& f,
+                              const std::array<double, 2>& domain, int N);
+
+// Append " M x.x y.y" / " L x.x y.y" / " Z" / etc. to an SVG path string in
+// place, with a leading space if the string isn't empty.  Used by the hot
+// loops below in lieu of a vector<string>+pt2str+join pattern, which used
+// to allocate ~5 strings per sample point and dominate graph rendering.
+static inline void append_cmd(std::string& d, char cmd, const Point2d& p) {
+    if (!d.empty()) d += ' ';
+    std::format_to(std::back_inserter(d), "{} {:.1f} {:.1f}", cmd, p[0], p[1]);
+}
+static inline void append_close(std::string& d) {
+    if (!d.empty()) d += ' ';
+    d += 'Z';
+}
 
 void graph(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status) {
     if (status == OutlineStatus::FinishOutline) {
@@ -83,11 +96,11 @@ void graph(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
 
     int N = std::stoi(get_attr(element, "N", "100"));
 
-    std::vector<std::string> cmds;
+    std::string d;
     if (polar) {
-        cmds = polar_path(element, diagram, f, domain, N);
+        d = polar_path(element, diagram, f, domain, N);
     } else {
-        cmds = cartesian_path(element, diagram, f, domain, N);
+        d = cartesian_path(element, diagram, f, domain, N);
     }
 
     // Set attributes
@@ -100,13 +113,7 @@ void graph(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus stat
     std::string id_str = diagram.find_id(element, get_attr(element, "id", ""));
     auto attribs = get_1d_attr(element);
     attribs["id"] = id_str;
-
-    std::string d;
-    for (const auto& c : cmds) {
-        if (!d.empty()) d += " ";
-        d += c;
-    }
-    attribs["d"] = d;
+    attribs["d"] = std::move(d);
     attribs["fill"] = "none";
 
     if (polar && element.attribute("fill")) {
@@ -155,11 +162,12 @@ static void finish_outline_graph(XmlNode element, Diagram& diagram, XmlNode pare
                            parent);
 }
 
-static std::vector<std::string> cartesian_path(XmlNode element, Diagram& diagram,
-                                                const MathFunction& f,
-                                                const std::array<double, 2>& domain, int N) {
+static std::string cartesian_path(XmlNode element, Diagram& diagram,
+                                   const MathFunction& f,
+                                   const std::array<double, 2>& domain, int N) {
     auto scales = diagram.get_scales();
     BBox bbox = diagram.bbox();
+    (void)element;  // currently unused but kept for symmetry with polar_path
 
     // Generate x positions
     std::vector<double> x_positions;
@@ -190,8 +198,9 @@ static std::vector<std::string> cartesian_path(XmlNode element, Diagram& diagram
         lower = bbox[1] - height;
     }
 
-    std::vector<std::string> cmds;
-    std::string next_cmd = "M";
+    std::string d;
+    d.reserve(static_cast<size_t>(N + 1) * 24);  // ~24 chars per "M xxxx.x yyyy.y "
+    char next_cmd = 'M';
     bool last_visible = false;
 
     for (int i = 0; i <= N; ++i) {
@@ -233,13 +242,12 @@ static std::vector<std::string> cartesian_path(XmlNode element, Diagram& diagram
                 try {
                     double fy = f(Value(last_good_x)).to_double();
                     Point2d p = diagram.transform(Point2d(last_good_x, fy));
-                    cmds.push_back("L");
-                    cmds.push_back(pt2str(p));
+                    append_cmd(d, 'L', p);
                 } catch (...) {}
             }
 
             last_visible = false;
-            next_cmd = "M";
+            next_cmd = 'M';
             continue;
         }
 
@@ -266,18 +274,17 @@ static std::vector<std::string> cartesian_path(XmlNode element, Diagram& diagram
                 try {
                     double fy = f(Value(last_good_x)).to_double();
                     Point2d p = diagram.transform(Point2d(last_good_x, fy));
-                    cmds.push_back("L");
-                    cmds.push_back(pt2str(p));
+                    append_cmd(d, 'L', p);
                 } catch (...) {}
             }
 
             last_visible = false;
-            next_cmd = "M";
+            next_cmd = 'M';
             continue;
         }
 
         // Current point is valid and in range
-        if (next_cmd == "M" && x > domain[0]) {
+        if (next_cmd == 'M' && x > domain[0]) {
             // Back up to find entry point from asymptote/out-of-bounds
             double ddx = dx / 2.0;
             double xx = x - ddx;
@@ -301,27 +308,25 @@ static std::vector<std::string> cartesian_path(XmlNode element, Diagram& diagram
                 try {
                     double fy = f(Value(last_good_x)).to_double();
                     Point2d p = diagram.transform(Point2d(last_good_x, fy));
-                    cmds.push_back("M");
-                    cmds.push_back(pt2str(p));
-                    next_cmd = "L";
+                    append_cmd(d, 'M', p);
+                    next_cmd = 'L';
                 } catch (...) {}
             }
         }
 
         Point2d p = diagram.transform(Point2d(x, y));
-        cmds.push_back(next_cmd);
-        cmds.push_back(pt2str(p));
-        next_cmd = "L";
+        append_cmd(d, next_cmd, p);
+        next_cmd = 'L';
 
         last_visible = (y < bbox[3] && y > bbox[1]);
     }
 
-    return cmds;
+    return d;
 }
 
-static std::vector<std::string> polar_path(XmlNode element, Diagram& diagram,
-                                            const MathFunction& f,
-                                            const std::array<double, 2>& domain, int N) {
+static std::string polar_path(XmlNode element, Diagram& diagram,
+                               const MathFunction& f,
+                               const std::array<double, 2>& domain, int N) {
     BBox bbox = diagram.bbox();
     Eigen::VectorXd bbox_min(2), bbox_max(2);
     bbox_min << bbox[0], bbox[1];
@@ -339,15 +344,16 @@ static std::vector<std::string> polar_path(XmlNode element, Diagram& diagram,
 
     double t = dom[0];
     double dt = (dom[1] - dom[0]) / N;
-    std::vector<std::string> polar_cmds;
-    std::string next_cmd = "M";
+    std::string d;
+    d.reserve(static_cast<size_t>(N + 1) * 24);
+    char next_cmd = 'M';
 
     for (int i = 0; i <= N; ++i) {
         double r;
         try {
             r = f(Value(t)).to_double();
         } catch (...) {
-            next_cmd = "M";
+            next_cmd = 'M';
             t += dt;
             continue;
         }
@@ -358,22 +364,21 @@ static std::vector<std::string> polar_path(XmlNode element, Diagram& diagram,
         Eigen::VectorXd cv(2);
         cv << center_pt[0], center_pt[1];
         if (distance(pv, cv) > 2.0 * R) {
-            next_cmd = "M";
+            next_cmd = 'M';
             t += dt;
             continue;
         }
 
-        polar_cmds.push_back(next_cmd);
-        polar_cmds.push_back(pt2str(diagram.transform(p)));
-        next_cmd = "L";
+        append_cmd(d, next_cmd, diagram.transform(p));
+        next_cmd = 'L';
         t += dt;
     }
 
     if (get_attr(element, "closed", "no") == "yes") {
-        polar_cmds.push_back("Z");
+        append_close(d);
     }
 
-    return polar_cmds;
+    return d;
 }
 
 }  // namespace prefigure

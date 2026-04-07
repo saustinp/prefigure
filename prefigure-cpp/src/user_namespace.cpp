@@ -309,7 +309,14 @@ private:
         return lookup_ident(name);
     }
 
+public:
     // -- value construction -------------------------------------------------
+    // The static helpers below (make_vector, make_list, lookup_ident_impl,
+    // subscript_impl, call_function_impl, vneg/vadd/.../binop) are exposed
+    // publicly so the free function evaluate_ast() and the RDParser-built
+    // AST can reuse them without duplicating ~250 lines of value-arithmetic
+    // and dispatch code.  RDEval lives in an anonymous namespace so this
+    // doesn't affect any external API.
     static Value make_vector(const std::vector<Value>& elems) {
         // If every element is a scalar, build an Eigen::VectorXd.
         bool all_scalar = true;
@@ -362,8 +369,12 @@ private:
 
     // -- variable / subscript -----------------------------------------------
     Value lookup_ident(const std::string& name) {
+        return lookup_ident_impl(name, ctx_);
+    }
+
+    static Value lookup_ident_impl(const std::string& name, ExpressionContext& ctx) {
         // Built-in constants are also looked up via the namespace.
-        if (ctx_.has(name)) return ctx_.retrieve(name);
+        if (ctx.has(name)) return ctx.retrieve(name);
         // Some math constants might not be in the namespace; provide them here.
         if (name == "pi") return Value(M_PI);
         if (name == "e") return Value(M_E);
@@ -372,10 +383,14 @@ private:
     }
 
     Value subscript(const std::string& name, const Value& idx) {
-        if (!ctx_.has(name)) {
+        return subscript_impl(name, idx, ctx_);
+    }
+
+    static Value subscript_impl(const std::string& name, const Value& idx, ExpressionContext& ctx) {
+        if (!ctx.has(name)) {
             throw std::runtime_error("unknown identifier in subscript: " + name);
         }
-        Value var = ctx_.retrieve(name);
+        Value var = ctx.retrieve(name);
         int i = static_cast<int>(idx.to_double());
         if (var.is_vector()) {
             const auto& v = var.as_vector();
@@ -400,9 +415,15 @@ private:
 
     // -- function dispatch --------------------------------------------------
     Value call_function(const std::string& name, const std::vector<Value>& args) {
+        return call_function_impl(name, args, ctx_);
+    }
+
+    static Value call_function_impl(const std::string& name,
+                                    const std::vector<Value>& args,
+                                    ExpressionContext& ctx) {
         // First: user-defined function from namespace?
-        if (ctx_.has(name)) {
-            Value v = ctx_.retrieve(name);
+        if (ctx.has(name)) {
+            Value v = ctx.retrieve(name);
             if (v.is_function()) {
                 if (args.size() != 1)
                     throw std::runtime_error("function " + name + " expects 1 argument");
@@ -568,7 +589,698 @@ private:
     }
 };
 
+// ============================================================================
+// ExprNode + RDParser + evaluate_ast: parse-once, walk-many fast path for
+// user-defined function definitions.
+// ============================================================================
+//
+// The legacy path stored a function body as the literal source string and ran
+// `ExpressionContext::eval(body)` on every call.  Profiling implicit.xml
+// showed that ~30% of total runtime was being spent inside RDEval re-parsing
+// the same 16-character string `"y^2 - x^3 + x"` on each QuadTree node visit
+// (perf trace pruned_trace.json: parse_expr 30.44%, parse_term 28.00%,
+// parse_unary 24.79%, strtod 4.26%, namespace lookups ~3%; actual `pow` only
+// 3.6%).  This block fixes that bug at its root: we parse the function body
+// once at definition time into a small AST, resolve identifiers that match
+// the function's parameter names to ParamRef nodes (eliminating per-call
+// hashmap probes for the bound arguments), and walk the AST against a
+// fixed-size binding array on each call.
+//
+// The grammar is identical to RDEval's; only the semantic actions change
+// (build nodes instead of computing Values eagerly).  RDEval is left intact
+// as the legacy fallback for any expression RDParser cannot handle.
+
+struct ExprNode {
+    enum class Op : uint8_t {
+        Const,        // k
+        StringLit,    // str
+        ParamRef,     // param_idx -- 0 or 1
+        NamespaceRef, // str (identifier name)
+        Neg,          // children[0]
+        Add, Sub, Mul, Div, Pow,  // children[0], children[1]
+        Call,         // str = function name, children = args
+        Subscript,    // str = identifier name, children[0] = index
+        VectorLit,    // children = elements (parenthesised tuple)
+        ListLit,      // children = elements (bracketed list)
+    };
+    Op op;
+    double k = 0.0;
+    uint8_t param_idx = 0;
+    std::string str;
+    std::vector<std::unique_ptr<ExprNode>> children;
+
+    explicit ExprNode(Op o) : op(o) {}
+};
+
+using ExprNodePtr = std::unique_ptr<ExprNode>;
+
+// Recursive AST evaluator.  bindings is a pointer (may be nullptr if the
+// AST contains no ParamRef nodes -- the parser only emits ParamRef when
+// constructed with a non-empty params vector).
+static Value evaluate_ast(const ExprNode& node,
+                          const Value* bindings,
+                          ExpressionContext& ctx) {
+    switch (node.op) {
+        case ExprNode::Op::Const:
+            return Value(node.k);
+        case ExprNode::Op::StringLit:
+            return Value(node.str);
+        case ExprNode::Op::ParamRef:
+            return bindings[node.param_idx];
+        case ExprNode::Op::NamespaceRef:
+            return RDEval::lookup_ident_impl(node.str, ctx);
+        case ExprNode::Op::Neg:
+            return RDEval::vneg(evaluate_ast(*node.children[0], bindings, ctx));
+        case ExprNode::Op::Add:
+            return RDEval::vadd(evaluate_ast(*node.children[0], bindings, ctx),
+                                evaluate_ast(*node.children[1], bindings, ctx));
+        case ExprNode::Op::Sub:
+            return RDEval::vsub(evaluate_ast(*node.children[0], bindings, ctx),
+                                evaluate_ast(*node.children[1], bindings, ctx));
+        case ExprNode::Op::Mul:
+            return RDEval::vmul(evaluate_ast(*node.children[0], bindings, ctx),
+                                evaluate_ast(*node.children[1], bindings, ctx));
+        case ExprNode::Op::Div:
+            return RDEval::vdiv(evaluate_ast(*node.children[0], bindings, ctx),
+                                evaluate_ast(*node.children[1], bindings, ctx));
+        case ExprNode::Op::Pow:
+            return RDEval::vpow(evaluate_ast(*node.children[0], bindings, ctx),
+                                evaluate_ast(*node.children[1], bindings, ctx));
+        case ExprNode::Op::Call: {
+            std::vector<Value> args;
+            args.reserve(node.children.size());
+            for (const auto& child : node.children) {
+                args.push_back(evaluate_ast(*child, bindings, ctx));
+            }
+            return RDEval::call_function_impl(node.str, args, ctx);
+        }
+        case ExprNode::Op::Subscript: {
+            Value idx = evaluate_ast(*node.children[0], bindings, ctx);
+            return RDEval::subscript_impl(node.str, idx, ctx);
+        }
+        case ExprNode::Op::VectorLit: {
+            std::vector<Value> elems;
+            elems.reserve(node.children.size());
+            for (const auto& child : node.children) {
+                elems.push_back(evaluate_ast(*child, bindings, ctx));
+            }
+            if (elems.size() == 1) return elems[0];
+            return RDEval::make_vector(elems);
+        }
+        case ExprNode::Op::ListLit: {
+            std::vector<Value> elems;
+            elems.reserve(node.children.size());
+            for (const auto& child : node.children) {
+                elems.push_back(evaluate_ast(*child, bindings, ctx));
+            }
+            return RDEval::make_list(elems);
+        }
+    }
+    throw std::runtime_error("evaluate_ast: invalid op");
+}
+
+// ----------------------------------------------------------------------------
+// Scalar fast path: evaluate_double
+//
+// The general evaluate_ast() above returns a `Value` (a 6-alternative
+// std::variant ~64 bytes wide) at every step.  Profiling implicit.xml after
+// items #1-#4 landed showed `_Variant_storage` + `_Copy_ctor_base` together
+// at ~6.4% of total time -- the cost of constructing and destroying these
+// variants on every recursive call inside the LevelSet::value hot loop.
+//
+// For the common case where a user function is purely scalar (Const,
+// ParamRef, Neg/Add/Sub/Mul/Div/Pow over scalars, NamespaceRef to a double,
+// and Call to a 1-arg builtin like sin/cos/exp/log/sqrt), there is no need
+// for the variant at all -- the entire computation can stay in `double`.
+// We add a parallel walker `evaluate_double` that returns `double` directly,
+// and a predicate `is_scalar_only` that decides at AST-build time whether
+// the body is eligible.  When eligible, try_define_function captures a
+// fast-path closure that calls evaluate_double and only constructs a single
+// Value at the boundary.  Otherwise the existing evaluate_ast path is used.
+//
+// This change is purely additive -- it cannot affect correctness for any
+// expression that doesn't qualify, and for the qualifying cases the result
+// is bit-identical to evaluate_ast (same std::pow / std::sin / etc.).
+
+// Set of built-in 1-arg scalar functions that are safe to invoke from the
+// double fast path.  This list mirrors the single-argument-scalar branch
+// of RDEval::call_function_impl() above.  Functions that touch vectors,
+// strings, or non-scalar Values must NOT appear here.
+static bool is_scalar_builtin_1(const std::string& name) {
+    static const std::unordered_set<std::string> scalars = {
+        "sin", "cos", "tan", "asin", "acos", "atan",
+        "sinh", "cosh", "tanh",
+        "exp", "log", "ln", "log2", "log10",
+        "sqrt", "cbrt",
+        "abs", "fabs", "ceil", "floor", "round",
+        "sec", "csc", "cot",
+    };
+    return scalars.find(name) != scalars.end();
+}
+
+// 2-arg scalar builtins.
+static bool is_scalar_builtin_2(const std::string& name) {
+    static const std::unordered_set<std::string> scalars = {
+        "atan2", "pow", "fmod", "max", "min",
+    };
+    return scalars.find(name) != scalars.end();
+}
+
+// Decide whether an AST is eligible for the double fast path.  An AST is
+// scalar-only iff every node:
+//   - is a Const, ParamRef, NamespaceRef-to-a-double, Neg, Add, Sub, Mul,
+//     Div, or Pow, or
+//   - is a Call to a known scalar-builtin with the right arity, where every
+//     argument is itself scalar-only.
+//
+// Subscripts, vector literals, list literals, string literals, and calls to
+// user-defined functions or vector builtins are all rejected.  We err on
+// the conservative side: if anything is unrecognised, the function falls
+// back to evaluate_ast.
+//
+// `ctx` is needed to check that NamespaceRef nodes resolve to a double
+// constant (e.g. `pi`, `e`, or a user-defined scalar like `k = 0.5`).  If
+// the namespace value is anything other than a scalar, we reject.
+static bool is_scalar_only(const ExprNode& node, const ExpressionContext& ctx) {
+    switch (node.op) {
+        case ExprNode::Op::Const:
+        case ExprNode::Op::ParamRef:
+            return true;
+        case ExprNode::Op::NamespaceRef: {
+            // Built-in math constants always exist
+            if (node.str == "pi" || node.str == "e" || node.str == "inf") return true;
+            // Otherwise look up in namespace_; must be a scalar Value
+            if (!ctx.has(node.str)) return false;
+            try {
+                Value v = ctx.retrieve(node.str);
+                return v.is_double();
+            } catch (...) {
+                return false;
+            }
+        }
+        case ExprNode::Op::Neg:
+            return is_scalar_only(*node.children[0], ctx);
+        case ExprNode::Op::Add:
+        case ExprNode::Op::Sub:
+        case ExprNode::Op::Mul:
+        case ExprNode::Op::Div:
+        case ExprNode::Op::Pow:
+            return is_scalar_only(*node.children[0], ctx) &&
+                   is_scalar_only(*node.children[1], ctx);
+        case ExprNode::Op::Call: {
+            const auto arity = node.children.size();
+            if (arity == 1 && is_scalar_builtin_1(node.str)) {
+                return is_scalar_only(*node.children[0], ctx);
+            }
+            if (arity == 2 && is_scalar_builtin_2(node.str)) {
+                return is_scalar_only(*node.children[0], ctx) &&
+                       is_scalar_only(*node.children[1], ctx);
+            }
+            return false;
+        }
+        case ExprNode::Op::Subscript:
+        case ExprNode::Op::VectorLit:
+        case ExprNode::Op::ListLit:
+        case ExprNode::Op::StringLit:
+            return false;
+    }
+    return false;
+}
+
+// The double-only walker.  Mirrors evaluate_ast() exactly for the scalar
+// subset, but never constructs a Value.  All variants of std::pow / std::sin
+// / etc. are the same library calls evaluate_ast would make via the
+// RDEval::call_function_impl dispatch, so the numerical results are
+// guaranteed to match bit-for-bit.
+static double evaluate_double(const ExprNode& node,
+                              const double* bindings,
+                              ExpressionContext& ctx) {
+    switch (node.op) {
+        case ExprNode::Op::Const:
+            return node.k;
+        case ExprNode::Op::ParamRef:
+            return bindings[node.param_idx];
+        case ExprNode::Op::NamespaceRef: {
+            if (node.str == "pi") return M_PI;
+            if (node.str == "e") return M_E;
+            if (node.str == "inf") return std::numeric_limits<double>::infinity();
+            // Caller has guaranteed (via is_scalar_only) that this exists
+            // and is a double, so a hashmap lookup here is safe.
+            return ctx.retrieve(node.str).as_double();
+        }
+        case ExprNode::Op::Neg:
+            return -evaluate_double(*node.children[0], bindings, ctx);
+        case ExprNode::Op::Add:
+            return evaluate_double(*node.children[0], bindings, ctx) +
+                   evaluate_double(*node.children[1], bindings, ctx);
+        case ExprNode::Op::Sub:
+            return evaluate_double(*node.children[0], bindings, ctx) -
+                   evaluate_double(*node.children[1], bindings, ctx);
+        case ExprNode::Op::Mul:
+            return evaluate_double(*node.children[0], bindings, ctx) *
+                   evaluate_double(*node.children[1], bindings, ctx);
+        case ExprNode::Op::Div:
+            return evaluate_double(*node.children[0], bindings, ctx) /
+                   evaluate_double(*node.children[1], bindings, ctx);
+        case ExprNode::Op::Pow:
+            return std::pow(evaluate_double(*node.children[0], bindings, ctx),
+                            evaluate_double(*node.children[1], bindings, ctx));
+        case ExprNode::Op::Call: {
+            const auto& name = node.str;
+            if (node.children.size() == 1) {
+                double a = evaluate_double(*node.children[0], bindings, ctx);
+                if (name == "sin")   return std::sin(a);
+                if (name == "cos")   return std::cos(a);
+                if (name == "tan")   return std::tan(a);
+                if (name == "asin")  return std::asin(a);
+                if (name == "acos")  return std::acos(a);
+                if (name == "atan")  return std::atan(a);
+                if (name == "sinh")  return std::sinh(a);
+                if (name == "cosh")  return std::cosh(a);
+                if (name == "tanh")  return std::tanh(a);
+                if (name == "exp")   return std::exp(a);
+                if (name == "log")   return std::log(a);
+                if (name == "ln")    return std::log(a);
+                if (name == "log2")  return std::log2(a);
+                if (name == "log10") return std::log10(a);
+                if (name == "sqrt")  return std::sqrt(a);
+                if (name == "cbrt")  return std::cbrt(a);
+                if (name == "abs")   return std::fabs(a);
+                if (name == "fabs")  return std::fabs(a);
+                if (name == "ceil")  return std::ceil(a);
+                if (name == "floor") return std::floor(a);
+                if (name == "round") return std::round(a);
+                if (name == "sec")   return prefigure::sec(a);
+                if (name == "csc")   return prefigure::csc(a);
+                if (name == "cot")   return prefigure::cot(a);
+            } else if (node.children.size() == 2) {
+                double a = evaluate_double(*node.children[0], bindings, ctx);
+                double b = evaluate_double(*node.children[1], bindings, ctx);
+                if (name == "atan2") return std::atan2(a, b);
+                if (name == "pow")   return std::pow(a, b);
+                if (name == "fmod")  return std::fmod(a, b);
+                if (name == "max")   return std::max(a, b);
+                if (name == "min")   return std::min(a, b);
+            }
+            // Should be unreachable thanks to is_scalar_only's gating, but
+            // fall through to a clear error if a future code path adds a new
+            // builtin to is_scalar_builtin_* without updating this dispatch.
+            throw std::runtime_error("evaluate_double: unsupported call: " + name);
+        }
+        // is_scalar_only rejects these; reaching them indicates a bug.
+        case ExprNode::Op::Subscript:
+        case ExprNode::Op::VectorLit:
+        case ExprNode::Op::ListLit:
+        case ExprNode::Op::StringLit:
+            throw std::runtime_error("evaluate_double: non-scalar op in scalar fast path");
+    }
+    throw std::runtime_error("evaluate_double: invalid op");
+}
+
+// Recursive-descent parser that produces an ExprNode AST.  Identical grammar
+// to RDEval; semantic actions build nodes instead of evaluating eagerly.
+//
+// If `params` is non-null and non-empty, identifiers whose names match a
+// param entry are emitted as ParamRef{idx} -- this is what makes the per-call
+// path skip the namespace hashmap entirely for f(x,y)'s bound arguments.
+class RDParser {
+public:
+    RDParser(const std::string& src, const std::vector<std::string>* params)
+        : src_(src), pos_(0), params_(params) {}
+
+    ExprNodePtr parse_top() {
+        skip_ws();
+        if (pos_ >= src_.size()) {
+            throw std::runtime_error("empty expression");
+        }
+        ExprNodePtr first = parse_expr();
+        skip_ws();
+        // Bare top-level tuple: a, b, c
+        if (pos_ < src_.size() && src_[pos_] == ',') {
+            auto vec = std::make_unique<ExprNode>(ExprNode::Op::VectorLit);
+            vec->children.push_back(std::move(first));
+            while (pos_ < src_.size() && src_[pos_] == ',') {
+                ++pos_;
+                vec->children.push_back(parse_expr());
+                skip_ws();
+            }
+            first = std::move(vec);
+        }
+        if (pos_ != src_.size()) {
+            throw std::runtime_error("unexpected trailing input at position " +
+                                     std::to_string(pos_));
+        }
+        return first;
+    }
+
+private:
+    const std::string& src_;
+    size_t pos_;
+    const std::vector<std::string>* params_;
+
+    void skip_ws() {
+        while (pos_ < src_.size() &&
+               std::isspace(static_cast<unsigned char>(src_[pos_])))
+            ++pos_;
+    }
+    char peek(size_t off = 0) const {
+        return (pos_ + off < src_.size()) ? src_[pos_ + off] : '\0';
+    }
+    bool consume_char(char c) {
+        skip_ws();
+        if (peek() == c) { ++pos_; return true; }
+        return false;
+    }
+    bool consume_str(const char* s) {
+        skip_ws();
+        size_t n = std::strlen(s);
+        if (pos_ + n <= src_.size() && src_.compare(pos_, n, s) == 0) {
+            pos_ += n;
+            return true;
+        }
+        return false;
+    }
+
+    static ExprNodePtr make_binop(ExprNode::Op op, ExprNodePtr lhs, ExprNodePtr rhs) {
+        auto n = std::make_unique<ExprNode>(op);
+        n->children.push_back(std::move(lhs));
+        n->children.push_back(std::move(rhs));
+        return n;
+    }
+
+    ExprNodePtr parse_expr() {
+        ExprNodePtr left = parse_term();
+        while (true) {
+            skip_ws();
+            char c = peek();
+            if (c == '+') { ++pos_; left = make_binop(ExprNode::Op::Add, std::move(left), parse_term()); }
+            else if (c == '-') { ++pos_; left = make_binop(ExprNode::Op::Sub, std::move(left), parse_term()); }
+            else break;
+        }
+        return left;
+    }
+
+    ExprNodePtr parse_term() {
+        ExprNodePtr left = parse_unary();
+        while (true) {
+            skip_ws();
+            // Avoid consuming ** as two separate * tokens
+            if (peek() == '*' && peek(1) == '*') break;
+            char c = peek();
+            if (c == '*') { ++pos_; left = make_binop(ExprNode::Op::Mul, std::move(left), parse_unary()); }
+            else if (c == '/') { ++pos_; left = make_binop(ExprNode::Op::Div, std::move(left), parse_unary()); }
+            else break;
+        }
+        return left;
+    }
+
+    ExprNodePtr parse_unary() {
+        skip_ws();
+        if (consume_char('+')) return parse_unary();
+        if (consume_char('-')) {
+            auto n = std::make_unique<ExprNode>(ExprNode::Op::Neg);
+            n->children.push_back(parse_unary());
+            return n;
+        }
+        return parse_power();
+    }
+
+    ExprNodePtr parse_power() {
+        ExprNodePtr base = parse_primary();
+        skip_ws();
+        if (consume_str("**") || consume_char('^')) {
+            ExprNodePtr exp = parse_unary();   // right-associative
+
+            // Peephole optimisation: small constant integer exponents become
+            // a left-associative Mul chain so the inner loop avoids the
+            // expensive __ieee754_pow_fma call entirely.  In the implicit.xml
+            // body `y^2 - x^3 + x`, this rewrites both subterms.  The trace
+            // showed `pow` at 5.6% self-time even after the AST walker landed.
+            //
+            // Constraints on the rewrite:
+            //   - exponent must be an integer Const node (not a variable)
+            //   - 2 <= n <= 6  (small enough that Mul chains don't bloat the
+            //     AST disproportionately, big enough to cover the common
+            //     cases of squaring and cubing)
+            //   - we cannot fold n=0 (always 1) or n=1 (always base) at this
+            //     stage without also evaluating side effects in `base`; the
+            //     existing AST walker handles those correctly via Pow anyway.
+            if (exp->op == ExprNode::Op::Const) {
+                double k = exp->k;
+                int ki = static_cast<int>(k);
+                if (k == static_cast<double>(ki) && ki >= 2 && ki <= 6) {
+                    // We need `ki` copies of `base`.  Clone the original base
+                    // subtree once into a template, then build a left-
+                    // associative Mul chain by repeatedly cloning the template
+                    // for the right operand.  E.g. for ki=3:
+                    //   base_template = clone(base)
+                    //   result = Mul(base, clone(base_template))           // x*x
+                    //   result = Mul(result, clone(base_template))         // (x*x)*x
+                    //
+                    // Cloning the original base each iteration (rather than
+                    // the running `result`) is what makes this O(ki * |base|)
+                    // rather than O(2^ki * |base|).
+                    auto base_template = clone_node(*base);
+                    ExprNodePtr result = make_binop(ExprNode::Op::Mul,
+                                                    std::move(base),
+                                                    clone_node(*base_template));
+                    for (int i = 2; i < ki; ++i) {
+                        result = make_binop(ExprNode::Op::Mul,
+                                            std::move(result),
+                                            clone_node(*base_template));
+                    }
+                    return result;
+                }
+            }
+
+            return make_binop(ExprNode::Op::Pow, std::move(base), std::move(exp));
+        }
+        return base;
+    }
+
+    // Deep-copy an ExprNode subtree.  Used by the pow->mul peephole above
+    // when an integer exponent requires multiple copies of the base.
+    static ExprNodePtr clone_node(const ExprNode& src) {
+        auto out = std::make_unique<ExprNode>(src.op);
+        out->k = src.k;
+        out->param_idx = src.param_idx;
+        out->str = src.str;
+        out->children.reserve(src.children.size());
+        for (const auto& c : src.children) {
+            out->children.push_back(clone_node(*c));
+        }
+        return out;
+    }
+
+    ExprNodePtr parse_primary() {
+        skip_ws();
+        if (pos_ >= src_.size()) {
+            throw std::runtime_error("unexpected end of expression");
+        }
+        char c = peek();
+
+        if (std::isdigit(static_cast<unsigned char>(c)) ||
+            (c == '.' && std::isdigit(static_cast<unsigned char>(peek(1))))) {
+            return parse_number();
+        }
+        if (c == '\'' || c == '"') {
+            return parse_string_literal();
+        }
+        if (c == '(') {
+            ++pos_;
+            std::vector<ExprNodePtr> elems;
+            elems.push_back(parse_expr());
+            skip_ws();
+            while (consume_char(',')) {
+                elems.push_back(parse_expr());
+                skip_ws();
+            }
+            if (!consume_char(')')) {
+                throw std::runtime_error("expected ')'");
+            }
+            if (elems.size() == 1) return std::move(elems[0]);
+            auto n = std::make_unique<ExprNode>(ExprNode::Op::VectorLit);
+            n->children = std::move(elems);
+            return n;
+        }
+        if (c == '[') {
+            ++pos_;
+            std::vector<ExprNodePtr> elems;
+            skip_ws();
+            if (peek() != ']') {
+                elems.push_back(parse_list_item());
+                skip_ws();
+                while (consume_char(',')) {
+                    elems.push_back(parse_list_item());
+                    skip_ws();
+                }
+            }
+            if (!consume_char(']')) {
+                throw std::runtime_error("expected ']'");
+            }
+            auto n = std::make_unique<ExprNode>(ExprNode::Op::ListLit);
+            n->children = std::move(elems);
+            return n;
+        }
+        if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+            return parse_ident_or_call();
+        }
+        throw std::runtime_error(std::string("unexpected character: '") + c + "'");
+    }
+
+    ExprNodePtr parse_list_item() {
+        skip_ws();
+        if (peek() == '\'' || peek() == '"') return parse_string_literal();
+        return parse_expr();
+    }
+
+    ExprNodePtr parse_number() {
+        size_t start = pos_;
+        while (pos_ < src_.size() &&
+               (std::isdigit(static_cast<unsigned char>(src_[pos_])) || src_[pos_] == '.'))
+            ++pos_;
+        if (pos_ < src_.size() && (src_[pos_] == 'e' || src_[pos_] == 'E')) {
+            ++pos_;
+            if (pos_ < src_.size() && (src_[pos_] == '+' || src_[pos_] == '-'))
+                ++pos_;
+            while (pos_ < src_.size() &&
+                   std::isdigit(static_cast<unsigned char>(src_[pos_])))
+                ++pos_;
+        }
+        auto n = std::make_unique<ExprNode>(ExprNode::Op::Const);
+        n->k = std::stod(src_.substr(start, pos_ - start));
+        return n;
+    }
+
+    ExprNodePtr parse_string_literal() {
+        // Match Python's string-literal escape rules; same logic as RDEval.
+        char quote = src_[pos_++];
+        std::string s;
+        while (pos_ < src_.size() && src_[pos_] != quote) {
+            if (src_[pos_] == '\\' && pos_ + 1 < src_.size()) {
+                char next = src_[pos_ + 1];
+                switch (next) {
+                    case 'n':  s += '\n'; pos_ += 2; break;
+                    case 't':  s += '\t'; pos_ += 2; break;
+                    case 'r':  s += '\r'; pos_ += 2; break;
+                    case '\\': s += '\\'; pos_ += 2; break;
+                    case '\'': s += '\''; pos_ += 2; break;
+                    case '"':  s += '"';  pos_ += 2; break;
+                    case '0':  s += '\0'; pos_ += 2; break;
+                    case 'a':  s += '\a'; pos_ += 2; break;
+                    case 'b':  s += '\b'; pos_ += 2; break;
+                    case 'f':  s += '\f'; pos_ += 2; break;
+                    case 'v':  s += '\v'; pos_ += 2; break;
+                    default:
+                        s += '\\';
+                        s += next;
+                        pos_ += 2;
+                        break;
+                }
+            } else {
+                s += src_[pos_++];
+            }
+        }
+        if (pos_ < src_.size()) ++pos_;  // skip closing quote
+        auto n = std::make_unique<ExprNode>(ExprNode::Op::StringLit);
+        n->str = std::move(s);
+        return n;
+    }
+
+    // Parse an identifier or function call.  This is the place where the
+    // parameter-resolution optimisation happens.
+    ExprNodePtr parse_ident_or_call() {
+        size_t start = pos_;
+        while (pos_ < src_.size() &&
+               (std::isalnum(static_cast<unsigned char>(src_[pos_])) || src_[pos_] == '_'))
+            ++pos_;
+        std::string name = src_.substr(start, pos_ - start);
+
+        skip_ws();
+        if (peek() == '(') {
+            // Function call
+            ++pos_;
+            std::vector<ExprNodePtr> args;
+            skip_ws();
+            if (peek() != ')') {
+                args.push_back(parse_expr());
+                skip_ws();
+                while (consume_char(',')) {
+                    args.push_back(parse_expr());
+                    skip_ws();
+                }
+            }
+            if (!consume_char(')')) {
+                throw std::runtime_error("expected ')' in call to " + name);
+            }
+            auto n = std::make_unique<ExprNode>(ExprNode::Op::Call);
+            n->str = std::move(name);
+            n->children = std::move(args);
+            return n;
+        }
+        if (peek() == '[') {
+            // Subscript
+            ++pos_;
+            ExprNodePtr idx = parse_expr();
+            skip_ws();
+            if (!consume_char(']')) {
+                throw std::runtime_error("expected ']' in subscript " + name);
+            }
+            auto n = std::make_unique<ExprNode>(ExprNode::Op::Subscript);
+            n->str = std::move(name);
+            n->children.push_back(std::move(idx));
+            return n;
+        }
+
+        // Plain identifier.  If it matches one of the surrounding function's
+        // parameters, emit ParamRef -- this is the key optimization that
+        // eliminates the per-call hashmap lookup for f(x,y)'s bound args.
+        if (params_) {
+            for (size_t i = 0; i < params_->size(); ++i) {
+                if ((*params_)[i] == name) {
+                    auto n = std::make_unique<ExprNode>(ExprNode::Op::ParamRef);
+                    n->param_idx = static_cast<uint8_t>(i);
+                    return n;
+                }
+            }
+        }
+        auto n = std::make_unique<ExprNode>(ExprNode::Op::NamespaceRef);
+        n->str = std::move(name);
+        return n;
+    }
+};
+
 }  // anonymous namespace
+
+// ----------------------------------------------------------------------------
+// CompiledScalar2State: per-function compiled state for the
+// CompiledFunction2 raw-function-pointer dispatcher.
+//
+// Held in ExpressionContext::compiled_scalar2_ as a unique_ptr (for stable
+// addresses), and pointed to by the impl_ field of every CompiledFunction2
+// returned from get_compiled_scalar2().  The dispatcher does a single
+// pointer cast and forwards to evaluate_double().
+//
+// Defined at namespace scope (not inside the anonymous namespace) because
+// the header forward-declares it.
+
+struct CompiledScalar2State {
+    std::shared_ptr<ExprNode> ast;
+    ExpressionContext* ctx;
+
+    CompiledScalar2State(std::shared_ptr<ExprNode> a, ExpressionContext* c)
+        : ast(std::move(a)), ctx(c) {}
+};
+
+// The dispatcher is a free function with C-compatible signature so its
+// address can be stored in the CompiledFunction2's invoke_ field.  No
+// virtual dispatch, no std::function overhead, no exception in the hot path
+// (evaluate_double only throws on bug-condition unreachable cases).
+static double dispatch_compiled_scalar2(const void* impl, double x, double y) {
+    const auto* state = static_cast<const CompiledScalar2State*>(impl);
+    double bindings[2] = { x, y };
+    return evaluate_double(*state->ast, bindings, *state->ctx);
+}
 
 // ============================================================================
 // Internal exprtk wrapper
@@ -759,14 +1471,69 @@ Value ExpressionContext::eval(const std::string& raw_expr,
                     // ^ is already power in exprtk, no change needed
                 }
 
+                // Parse-once fast path: try to compile the function body
+                // into an ExprNode AST.  If parsing succeeds, the closure
+                // captures a shared_ptr<ExprNode> and walks the tree on each
+                // call -- no per-call re-parsing, no per-call namespace
+                // hashmap probes for the bound parameters.  If parsing fails
+                // for any reason, we fall back to the legacy
+                // capture-string-and-eval closure below, so any expression
+                // RDParser cannot handle still works exactly as before.
+                std::shared_ptr<ExprNode> compiled_body;
+                try {
+                    RDParser parser(body, &arg_names);
+                    compiled_body = std::shared_ptr<ExprNode>(parser.parse_top().release());
+                } catch (const std::exception& e) {
+                    spdlog::debug("RDParser could not pre-compile '{}' for {}: {} -- "
+                                  "falling back to per-call eval",
+                                  body, func_name, e.what());
+                    compiled_body.reset();
+                }
+
+                // If the AST is a pure-scalar expression we can use the
+                // double fast path, which avoids constructing Value variants
+                // on every recursive node visit.  Decided once here at
+                // definition time so the per-call closure doesn't have to
+                // re-check anything.
+                const bool scalar_fast =
+                    compiled_body && is_scalar_only(*compiled_body, *this);
+
                 if (arg_names.size() == 1) {
-                    // Single argument function
-                    auto captured_body = body;
-                    auto captured_arg = arg_names[0];
                     auto* ctx = this;
 
+                    if (scalar_fast) {
+                        // Fast-path: scalar AST walked as plain double.  The
+                        // boundary still has to convert Value <-> double for
+                        // the MathFunction signature, but the heavy
+                        // recursion never touches a variant.
+                        MathFunction func = [ctx, compiled_body](Value arg_val) -> Value {
+                            double bindings[1] = { arg_val.to_double() };
+                            return Value(evaluate_double(*compiled_body, bindings, *ctx));
+                        };
+                        functions_.insert(func_name);
+                        variables_.insert(func_name);
+                        namespace_[func_name] = Value(func);
+                        return Value(func);
+                    }
+
+                    if (compiled_body) {
+                        // Slow path: parse-once AST walk that returns Value.
+                        // Used when the body involves vectors, subscripts,
+                        // user-defined function calls, or any non-scalar op.
+                        MathFunction func = [ctx, compiled_body](Value arg_val) -> Value {
+                            Value bindings[1] = { std::move(arg_val) };
+                            return evaluate_ast(*compiled_body, bindings, *ctx);
+                        };
+                        functions_.insert(func_name);
+                        variables_.insert(func_name);
+                        namespace_[func_name] = Value(func);
+                        return Value(func);
+                    }
+
+                    // Legacy path: capture source string, re-parse on each call
+                    auto captured_body = body;
+                    auto captured_arg = arg_names[0];
                     MathFunction func = [ctx, captured_body, captured_arg](Value arg_val) -> Value {
-                        // Create a temporary scope
                         Value old;
                         bool had_old = ctx->has(captured_arg);
                         if (had_old) old = ctx->retrieve(captured_arg);
@@ -786,11 +1553,53 @@ Value ExpressionContext::eval(const std::string& raw_expr,
                     return Value(func);
 
                 } else if (arg_names.size() == 2) {
-                    // Two argument function (e.g., for ODEs: f(t, y))
-                    auto captured_body = body;
-                    auto captured_args = arg_names;
                     auto* ctx = this;
 
+                    if (scalar_fast) {
+                        // Scalar fast path for 2-arg functions like the
+                        // implicit-curve level set f(x,y) = y^2 - x^3 + x.
+                        // The hot inner loop in implicit.cpp / slope_field.cpp
+                        // / diffeqs.cpp now walks the AST in pure double,
+                        // skipping all Value variant copy/destroy overhead.
+                        MathFunction2 func = [ctx, compiled_body](Value a1, Value a2) -> Value {
+                            double bindings[2] = { a1.to_double(), a2.to_double() };
+                            return Value(evaluate_double(*compiled_body, bindings, *ctx));
+                        };
+                        functions_.insert(func_name);
+                        variables_.insert(func_name);
+                        namespace_[func_name] = Value(func);
+
+                        // Also publish a CompiledFunction2 view of the same
+                        // AST under the same name, so hot inner loops in
+                        // element handlers can opt into the raw-function-
+                        // pointer dispatch (no std::function shim, no Value
+                        // copy/destroy at the boundary).  See
+                        // ExpressionContext::get_compiled_scalar2() and
+                        // implicit.cpp::implicit_curve.
+                        compiled_scalar2_[func_name] =
+                            std::make_unique<CompiledScalar2State>(compiled_body, ctx);
+
+                        return Value(func);
+                    }
+
+                    if (compiled_body) {
+                        // Slow (general) AST path for 2-arg functions whose
+                        // body uses vectors, subscripts, etc.  Notably this
+                        // is the path de-system.xml takes because its ODE
+                        // RHS returns a 2-vector.
+                        MathFunction2 func = [ctx, compiled_body](Value a1, Value a2) -> Value {
+                            Value bindings[2] = { std::move(a1), std::move(a2) };
+                            return evaluate_ast(*compiled_body, bindings, *ctx);
+                        };
+                        functions_.insert(func_name);
+                        variables_.insert(func_name);
+                        namespace_[func_name] = Value(func);
+                        return Value(func);
+                    }
+
+                    // Legacy path: capture source string, re-parse on each call
+                    auto captured_body = body;
+                    auto captured_args = arg_names;
                     MathFunction2 func = [ctx, captured_body, captured_args](Value a1, Value a2) -> Value {
                         Value old1, old2;
                         bool had1 = ctx->has(captured_args[0]);
@@ -874,8 +1683,17 @@ Value ExpressionContext::eval(const std::string& raw_expr,
     // so that exprtk can handle the rest.
     std::string processed_expr = replace_function_calls(subscript_replaced);
 
-    // Try scalar evaluation with exprtk
-    // First, we need to set up exprtk with current namespace scalars
+    // Try scalar evaluation with exprtk.
+    //
+    // We use a cached `exprtk::parser<double>` (lazily created on first
+    // call) so we don't pay the parser-construction cost (~3% of total time
+    // in the implicit profile pre-Phase-1.5) on every label/attribute eval.
+    // The symbol_table is still built fresh per call -- it's cheap by
+    // comparison and avoids the bookkeeping needed to keep cached variable
+    // bindings in sync with namespace_ across calls.
+    if (!exprtk_state_) {
+        exprtk_state_ = std::make_unique<ExprtkState>();
+    }
     try {
         exprtk::symbol_table<double> sym;
         sym.add_constants();
@@ -894,8 +1712,7 @@ Value ExpressionContext::eval(const std::string& raw_expr,
         exprtk::expression<double> expression;
         expression.register_symbol_table(sym);
 
-        exprtk::parser<double> parser;
-        if (parser.compile(processed_expr, expression)) {
+        if (exprtk_state_->parser.compile(processed_expr, expression)) {
             double result_val = expression.value();
             Value result(result_val);
             if (name) {
@@ -1009,8 +1826,15 @@ static bool is_ident_char(char c) {
 }
 
 std::string ExpressionContext::replace_array_subscripts(const std::string& expr) {
+    // The pattern for `name[index]` never changes, so compile it exactly once.
+    // Without this, std::regex's compiler ran on every label/attribute eval and
+    // showed up at ~7% of total runtime in the implicit.xml profile (the
+    // _M_disjunction / _M_alternative / _M_bracket_expression chain in
+    // libstdc++).  function-local static is initialised exactly once and is
+    // thread-safe under C++11+.
+    static const std::regex sub_re(R"(([a-zA-Z_]\w*)\[([^\]]+)\])");
+
     std::string result = expr;
-    std::regex sub_re(R"(([a-zA-Z_]\w*)\[([^\]]+)\])");
     std::smatch match;
     std::string working = result;
 
@@ -1227,6 +2051,37 @@ Value ExpressionContext::measure_de_jump(const MathFunction2& f, double t, const
 
 void ExpressionContext::finish_breaks() {
     breaks_ = nullptr;
+}
+
+std::optional<CompiledFunction2>
+ExpressionContext::get_compiled_scalar2(const std::string& name_or_expr) const {
+    // Trim leading/trailing whitespace.  Anything more elaborate (parens,
+    // operators, function calls of functions) means the caller wants to
+    // evaluate an expression, not look up a single named function, and we
+    // return nullopt so the caller falls back to the regular MathFunction2.
+    size_t first = name_or_expr.find_first_not_of(" \t\n\r");
+    if (first == std::string::npos) return std::nullopt;
+    size_t last = name_or_expr.find_last_not_of(" \t\n\r");
+    std::string name = name_or_expr.substr(first, last - first + 1);
+
+    // The name must be a single bare identifier.
+    if (name.empty()) return std::nullopt;
+    if (!std::isalpha(static_cast<unsigned char>(name[0])) && name[0] != '_') {
+        return std::nullopt;
+    }
+    for (char c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+            return std::nullopt;
+        }
+    }
+
+    auto it = compiled_scalar2_.find(name);
+    if (it == compiled_scalar2_.end()) return std::nullopt;
+
+    CompiledFunction2 cf;
+    cf.impl_ = it->second.get();
+    cf.invoke_ = &dispatch_compiled_scalar2;
+    return cf;
 }
 
 }  // namespace prefigure
