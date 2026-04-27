@@ -115,12 +115,15 @@ def build(
     return filename
 
 
-# Build from an input string and return a string formed from
-# an XML tree containing the SVG and annotation trees
+# Build from an input string and return (svg_string, annotations_string_or_None).
+# Both backends (C++ and Python) return the same 2-tuple shape; the second
+# element is None when the diagram has no annotations or rendering failed.
 def build_from_string(format, input_string, environment="pyodide"):
     if _get_backend():
         from prefig import _prefigure
-        return _prefigure.build_from_string(format, input_string, environment)
+        result = _prefigure.build_from_string(format, input_string, environment)
+        # C++ binding returns std::pair<string, optional<string>> -> (str, str|None)
+        return _normalize_build_result(result)
 
     # Pure Python fallback
     tree = ET.fromstring(input_string)
@@ -133,7 +136,7 @@ def build_from_string(format, input_string, environment="pyodide"):
     try:
         diagram = diagrams[0]
     except:
-        return ''
+        return ('', None)
 
     # put all elements in default namespace
     for elem in diagram.getiterator():
@@ -148,7 +151,7 @@ def build_from_string(format, input_string, environment="pyodide"):
 
     core.parse.check_duplicate_handles(diagram, set())
 
-    output_string = core.parse.mk_diagram(
+    result = core.parse.mk_diagram(
         diagram,
         format,
         None,     # publication file
@@ -158,7 +161,25 @@ def build_from_string(format, input_string, environment="pyodide"):
         environment,
         return_string = True
     )
-    return output_string
+    return _normalize_build_result(result)
+
+
+def _normalize_build_result(result):
+    """Coerce backend results into a uniform (svg_str, annotations_or_None) tuple.
+
+    Accepts: a 2-tuple, a bare string (legacy/short-circuit), or None
+    (Python mk_diagram's implicit return on early failure).
+    """
+    if result is None:
+        return ('', None)
+    if isinstance(result, tuple):
+        if len(result) >= 2:
+            return (result[0] or '', result[1])
+        if len(result) == 1:
+            return (result[0] or '', None)
+        return ('', None)
+    # Plain string (defensive: covers any caller still on the old contract)
+    return (result, None)
 
 def pdf(
         format,

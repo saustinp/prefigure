@@ -9,14 +9,15 @@
 
 namespace prefigure {
 
-std::string mk_diagram(XmlNode element,
-                       OutputFormat format,
-                       XmlNode publication,
-                       const std::string& filename,
-                       bool suppress_caption,
-                       std::optional<int> diagram_number,
-                       Environment environment,
-                       bool return_string) {
+std::pair<std::string, std::optional<std::string>>
+mk_diagram(XmlNode element,
+           OutputFormat format,
+           XmlNode publication,
+           const std::string& filename,
+           bool suppress_caption,
+           std::optional<int> diagram_number,
+           Environment environment,
+           bool return_string) {
 
     std::optional<std::string> output = std::nullopt;
     Diagram diag(element, filename, diagram_number,
@@ -29,7 +30,7 @@ std::string mk_diagram(XmlNode element,
     } catch (const std::exception& e) {
         spdlog::error("There was a problem initializing the PreFigure diagram");
         spdlog::error("Error: {}", e.what());
-        return "";
+        return {"", std::nullopt};
     }
 
     spdlog::debug("Processing PreFigure elements");
@@ -38,7 +39,7 @@ std::string mk_diagram(XmlNode element,
     } catch (const std::exception& e) {
         spdlog::error("There was a problem parsing a PreFigure element");
         spdlog::error("Error: {}", e.what());
-        return "";
+        return {"", std::nullopt};
     }
 
     spdlog::debug("Positioning labels");
@@ -47,23 +48,22 @@ std::string mk_diagram(XmlNode element,
     } catch (const std::exception& e) {
         spdlog::error("There was a problem placing the labels in the diagram");
         spdlog::error("Error: {}", e.what());
-        return "";
+        return {"", std::nullopt};
     }
 
     spdlog::debug("Writing the diagram and any annotations");
     diag.annotate_source();
     try {
         if (return_string) {
-            auto [svg, ann] = diag.end_figure_to_string();
-            return svg;
+            return diag.end_figure_to_string();
         } else {
             diag.end_figure();
-            return "";
+            return {"", std::nullopt};
         }
     } catch (const std::exception& e) {
         spdlog::error("There was a problem finishing the diagram");
         spdlog::error("Error: {}", e.what());
-        return "";
+        return {"", std::nullopt};
     }
 }
 
@@ -206,9 +206,10 @@ void check_duplicate_handles(XmlNode element, std::set<std::string>& handles) {
     }
 }
 
-std::string build_from_string(const std::string& format_str,
-                               const std::string& xml_string,
-                               const std::string& environment) {
+std::pair<std::string, std::optional<std::string>>
+build_from_string(const std::string& format_str,
+                  const std::string& xml_string,
+                  const std::string& environment) {
     // Parse format string
     OutputFormat format = OutputFormat::SVG;
     if (format_str == "tactile") {
@@ -228,7 +229,7 @@ std::string build_from_string(const std::string& format_str,
     auto result = doc.load_string(xml_string.c_str());
     if (!result) {
         spdlog::error("Unable to parse XML string");
-        return "";
+        return {"", std::nullopt};
     }
 
     // Helper lambdas (same as in parse())
@@ -267,7 +268,7 @@ std::string build_from_string(const std::string& format_str,
 
     auto diagram = find_diagram(doc);
     if (!diagram) {
-        return "";
+        return {"", std::nullopt};
     }
 
     // Strip namespace prefixes
@@ -278,7 +279,7 @@ std::string build_from_string(const std::string& format_str,
     std::set<std::string> handles;
     check_duplicate_handles(diagram, handles);
 
-    // Build the diagram and return as string
+    // Build the diagram and return SVG + optional annotations
     XmlNode null_publication;
     return mk_diagram(diagram, format, null_publication,
                       "prefig", false, std::nullopt, env, true);

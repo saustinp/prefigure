@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PreFigure browser demo</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      max-width: 800px;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      color: #222;
+    }
+    h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+    p.subtitle { color: #555; margin-top: 0; }
+    button {
+      font-size: 1.1rem;
+      padding: 0.65rem 1.3rem;
+      border: 1px solid #2a6df4;
+      background: #2a6df4;
+      color: white;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover:not(:disabled) { background: #1a55d0; }
+    button:disabled { opacity: 0.5; cursor: progress; }
+    #status {
+      color: #555;
+      margin-top: 0.6rem;
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 0.9rem;
+      min-height: 1.2em;
+    }
+    #figure {
+      margin-top: 1.5rem;
+      padding: 0.5rem;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      min-height: 320px;
+      background: white;
+    }
+    #figure svg {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }
+    #figure:empty::before {
+      content: "(no figure yet)";
+      color: #aaa;
+      display: block;
+      text-align: center;
+      padding: 8rem 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>PreFigure browser demo</h1>
+  <p class="subtitle">
+    Click the button to render <code>examples/implicit.xml</code> via the C++
+    backend running in the FastAPI server, and inject the returned SVG below.
+  </p>
+
+  <button id="run">Click me to run test</button>
+  <div id="status"></div>
+  <div id="figure"></div>
+
+<script>
+(() => {
+  const button = document.getElementById('run');
+  const figure = document.getElementById('figure');
+  const status = document.getElementById('status');
+
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    status.textContent = 'rendering…';
+    const t0 = performance.now();
+    try {
+      const res = await fetch('/api/examples/implicit');
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`server ${res.status}: ${body || res.statusText}`);
+      }
+      const svg = await res.text();
+      figure.innerHTML = svg;
+      const ms = (performance.now() - t0).toFixed(0);
+      const kb = (svg.length / 1024).toFixed(1);
+      status.textContent = `rendered in ${ms} ms (${kb} KB svg)`;
+    } catch (err) {
+      figure.innerHTML = '';
+      status.textContent = `error: ${err.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>

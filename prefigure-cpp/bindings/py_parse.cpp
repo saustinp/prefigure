@@ -17,5 +17,6 @@ void bind_parse(py::module_& m) {
           py::arg("format"),
           py::arg("xml_string"),
           py::arg("environment") = "pyodide",
-          "Parse an XML string and return SVG output as a string");
+          "Parse an XML string and return a (svg, annotations_or_None) tuple. "
+          "Returns (\"\", None) on parse failure or missing <diagram>.");
 }

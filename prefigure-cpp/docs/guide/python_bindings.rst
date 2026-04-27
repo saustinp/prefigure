@@ -14,8 +14,10 @@ pugixml (C++) at the type level:
 
 1. Python converts ``lxml.etree.Element`` to a string
 2. The string is passed to C++ via pybind11
-3. C++ parses it with pugixml, processes it, and returns SVG as a string
-4. Python receives the SVG string (or writes it to disk)
+3. C++ parses it with pugixml, processes it, and returns
+   ``(svg_string, optional<annotations_string>)``
+4. Python receives the tuple ``(svg, annotations_or_None)`` (or, for the
+   file-based ``parse()`` entry point, C++ writes outputs to disk)
 
 This approach is simple, safe, and avoids memory ownership ambiguity.
 
@@ -74,6 +76,7 @@ convert between lxml elements and strings::
     import lxml.etree as ET
 
     def build_from_string(format_str, xml_string, environment="pyodide"):
+        # Returns (svg_string, annotations_string_or_None).
         return _prefigure.build_from_string(format_str, xml_string, environment)
 
     def parse(filename, format_str="svg", pub_file="",
