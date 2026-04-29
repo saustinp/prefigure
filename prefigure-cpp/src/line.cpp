@@ -21,6 +21,52 @@ static void finish_outline(XmlNode element, Diagram& diagram, XmlNode parent);
 static XmlNode add_label_to_line(XmlNode element, Diagram& diagram, XmlNode parent);
 static void remove_id(XmlNode el);
 
+// Try to parse a pair-of-points expression like "((ax,ay),(bx,by))" by
+// manually finding the top-level comma at paren depth 0 and evaluating each
+// side as a 2-vector.  Needed because exprtk reads "(a,b)" as the
+// comma-sequence operator (returns the last value) rather than a 2-vector
+// literal, so the obvious flat eval returns a scalar instead of a 4-vector.
+//
+// The Python prefigure handles this via Python's `eval()` which natively
+// returns a tuple of tuples; exprtk has no equivalent, so this helper
+// emulates the behavior for the specific shape DoenetML emits.
+static std::optional<std::pair<Point2d, Point2d>>
+try_parse_pair_of_points(const std::string& s, Diagram& diagram) {
+    // Strip whitespace.
+    std::string str;
+    str.reserve(s.size());
+    for (char c : s) if (!std::isspace(static_cast<unsigned char>(c))) str += c;
+
+    if (str.size() < 2 || str.front() != '(' || str.back() != ')') {
+        return std::nullopt;
+    }
+    // Strip the outer parens.
+    str = str.substr(1, str.size() - 2);
+
+    // Find the top-level comma (paren depth zero).
+    int depth = 0;
+    std::size_t comma_pos = std::string::npos;
+    for (std::size_t i = 0; i < str.size(); ++i) {
+        char c = str[i];
+        if (c == '(' || c == '[') ++depth;
+        else if (c == ')' || c == ']') --depth;
+        else if (c == ',' && depth == 0) { comma_pos = i; break; }
+    }
+    if (comma_pos == std::string::npos) return std::nullopt;
+
+    std::string left = str.substr(0, comma_pos);
+    std::string right = str.substr(comma_pos + 1);
+    try {
+        auto v1 = diagram.expr_ctx().eval(left);
+        auto v2 = diagram.expr_ctx().eval(right);
+        Point2d p1 = v1.as_point();
+        Point2d p2 = v2.as_point();
+        return std::make_pair(p1, p2);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 void line(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus status) {
     if (status == OutlineStatus::FinishOutline) {
         finish_outline(element, diagram, parent);
@@ -46,28 +92,35 @@ void line(XmlNode element, Diagram& diagram, XmlNode parent, OutlineStatus statu
             return;
         }
     } else {
+        // First, try the flat 4-vector form (e.g., "[x1,y1,x2,y2]" if exprtk
+        // happens to return a vector).  If that doesn't yield a 4-vector,
+        // fall back to the pair-of-points form ((x1,y1),(x2,y2)) that
+        // DoenetML emits.
+        bool parsed = false;
         try {
             auto val = diagram.expr_ctx().eval(endpts_attr.value());
-            // The result should be a vector of length 4 or a pair of 2d points
-            auto& v = val.as_vector();
-            if (v.size() == 4) {
-                p1 = Point2d(v[0], v[1]);
-                p2 = Point2d(v[2], v[3]);
-            } else {
-                spdlog::error("Error in <line> parsing endpoints={}", endpts_attr.value());
-                return;
+            if (val.is_vector()) {
+                auto& v = val.as_vector();
+                if (v.size() == 4) {
+                    p1 = Point2d(v[0], v[1]);
+                    p2 = Point2d(v[2], v[3]);
+                    parsed = true;
+                }
             }
         } catch (...) {
-            // Try evaluating as two separate points
-            try {
-                auto val = diagram.expr_ctx().eval(endpts_attr.value());
-                // If it's a nested structure, we need the two sub-vectors
-                spdlog::error("Error in <line> parsing endpoints={}", endpts_attr.value());
-                return;
-            } catch (...) {
-                spdlog::error("Error in <line> parsing endpoints={}", endpts_attr.value());
-                return;
+            // exprtk raised; fall through to pair-of-points fallback.
+        }
+        if (!parsed) {
+            auto pair = try_parse_pair_of_points(endpts_attr.value(), diagram);
+            if (pair.has_value()) {
+                p1 = pair->first;
+                p2 = pair->second;
+                parsed = true;
             }
+        }
+        if (!parsed) {
+            spdlog::error("Error in <line> parsing endpoints={}", endpts_attr.value());
+            return;
         }
     }
 
